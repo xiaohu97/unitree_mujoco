@@ -208,7 +208,7 @@ void UnitreeSdk2Bridge::PublishHighState()
         bool right_contact_detected = false;
 
         // 力阈值：根据模型质量和单位调整（牛顿级）；若接触力非常小请调低
-        const double contact_force_threshold = 1e-3;
+        const double contact_force_threshold = 0.5;
 
         // 如果没有接触记录，ncon == 0
         for (int i = 0; i < mj_data_->ncon; i++)

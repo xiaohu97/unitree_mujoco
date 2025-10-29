@@ -3,9 +3,9 @@ import numpy as np
 import cv2
 import noise
 
-ROBOT = "go2"
-INPUT_SCENE_PATH = "./scene.xml"
-OUTPUT_SCENE_PATH = "../unitree_robots/" + ROBOT + "/scene_terrain.xml"
+ROBOT = "g1"
+INPUT_SCENE_PATH = "./scene_29dof.xml"
+OUTPUT_SCENE_PATH = "../unitree_robots/" + ROBOT + "/scene_g1_29dof_terrain.xml"
 
 
 # zyx euler angle to quaternion

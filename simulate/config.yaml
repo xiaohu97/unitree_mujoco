@@ -1,5 +1,7 @@
 robot: "g1"  # Robot name, "go2", "b2", "b2w", "h1", "go2w", "g1"
-robot_scene: "scene_29dof.xml" # Robot scene, /unitree_robots/[robot]/scene.xml 
+# robot_scene: "scene_29dof.xml" # Robot scene, /unitree_robots/[robot]/scene.xml 
+
+robot_scene: "scene_g1_29dof_terrain.xml" 
 
 domain_id: 0  # Domain id  g1 0  go2 1
 interface: "lo" # Interface "lo" 表示使用本地回环接口（localhost），适合仿真环境。
