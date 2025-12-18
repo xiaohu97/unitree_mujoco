@@ -1,48 +1,52 @@
-# Introduction
+
+# 介绍
 ## Unitree mujoco
-`unitree_mujoco` is a simulator developed based on `Unitree sdk2` and `mujoco`. Users can easily integrate the control programs developed with `Unitree_sdk2`, `unitree_ros2`, and `unitree_sdk2_python` into this simulator, enabling a seamless transition from simulation to physical development. The repository includes two versions of the simulator implemented in C++ and Python, with a structure as follows:
+`unitree_mujoco` 是基于 `Unitree sdk2` 和 `mujoco` 开发的仿真器。用户使用 `Unitree_sdk2`、 `unitree_ros2` 和 `unitree_sdk2_python` 开发的控制程序可以方便地接入该仿真器，实现仿真到实物的开发流程。仓库别基于 c++ 和 python 实现了两个版本的仿真器， 其结构大致如下图所示:
+
 ![](./doc/func.png)
 
-## Directory Structure
-- `simulate`: Simulator implemented based on unitree_sdk2 and mujoco (C++, recommended)
-- `simulate_python`: Simulator implemented based on unitree_sdk2_python and mujoco (Python)
-- `unitree_robots`: MJCF description files for robots supported by unitree_sdk2
-- `terrain_tool`: Tool for generating terrain in simulation scenarios
-- `example`: Example programs
+## 目录结构
+- `simulate`: 基于 unitree_sdk2 和 mujoco (c++) 实现的仿真器（推荐）
+- `simulate_python`: 基于 unitree_sdk2py 和 mujoco (python) 实现的仿真器
+- `unitree_robots`: unitree_sdk2 支持的机器人 mjcf 描述文件
+- `terrain_tool`: 仿真场景地形生成工具
+- `example`: 例程
 
-## Supported Unitree sdk2 Messages:
-**Current version only supports low-level development, mainly used for sim to real verification of controller**
-- `LowCmd`: Motor control commands
-- `LowState`: Motor state information
-- `SportModeState`: Robot position and velocity data
-- `IMUState`: Torso IMU state at `rt/secondary_imu` topic (G1 only)
+## 支持的 Unitree sdk2 消息：
+**当前版本仅支持底层开发，主要用于控制器的 sim to real 验证**
+- `LowCmd`: 电机控制指令
+- `LowState`：电机状态
+- `SportModeState`：机器人位置和速度
+- `IMUState`: 胸部IMU数据，话题为 `rt/secondary` (仅 G1)
 
-Note:
-1. The numbering of the motors corresponds to the actual robot hardware. Specific details can be found in the [Unitree documentation](https://support.unitree.com/home/zh/developer).
-2. In the actual robot hardware, the `SportModeState` message is not readable after the built-in motion control service is turned off. However, the simulator retains this message to allow users to utilize the position and velocity information for analyzing the developed control programs.
+## 消息(DDS idl)类型说明
+- Unitree Go2, B2, H1, B2w, Go2w 型号的机器人使用 unitree_go idl 实现底层通信
+- Unitree G1, H1-2 型号的机器人使用 unitree_hg 实现底层通信
 
-## Related links
+注：
+ 1. 电机的编号与机器人实物一致，具体可参考 [Unitree 文档](https://support.unitree.com/home/zh/developer)
+ 2. 在机器人实物上关闭自带的运控服务后， `SportModeState` 消息是无法读取的。仿真中保留了这一消息，便于用户利用位置和速度信息分析所开发的控制程序。
+
+## 相关链接
 - [unitree_sdk2](https://github.com/unitreerobotics/unitree_sdk2)
 - [unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2_python)
 - [unitree_ros2](https://github.com/unitreerobotics/unitree_ros2)
-- [Unitree Doc](https://support.unitree.com/home/zh/developer)
-- [Mujoco Doc](https://mujoco.readthedocs.io/en/stable/overview.html)
+- [Unitree 文档](https://support.unitree.com/home/zh/developer)
+- [mujoco doc](https://mujoco.readthedocs.io/en/stable/overview.html)
 
-## Message (DDS idl) type description
-- Unitree Go2, B2, H1, B2w, Go2w robots use unitree_go idl for low-level communication.
-- Unitree G1, H1-2 robot uses unitree_hg idl for low-level communication.
-
-
-# Installation
-## C++ Simulator (simulate)
-### 1. Dependencies
+# 安装
+## c++ 仿真器 (simulate)
+### 1. 依赖
 
 ```bash
 sudo apt install libyaml-cpp-dev libspdlog-dev libboost-all-dev libglfw3-dev
+# 安装 GLFW：
+sudo apt install -y libglfw3 libglfw3-dev
+
 ```
 
 #### unitree_sdk2
-It is recommended to install `unitree_sdk2` in `/opt/unitree_robotics` path.
+推荐将 `unitree_sdk2` 安装在 `/opt/unitree_robotics` 路径下。
 ```bash
 git clone https://github.com/unitreerobotics/unitree_sdk2.git
 cd unitree_sdk2/
@@ -51,39 +55,41 @@ cd build
 cmake .. -DCMAKE_INSTALL_PREFIX=/opt/unitree_robotics
 sudo make install
 ```
-For more details, see: https://github.com/unitreerobotics/unitree_sdk2
+详细见：https://github.com/unitreerobotics/unitree_sdk2
 #### mujoco
 
-Download the mujoco [release](https://github.com/google-deepmind/mujoco/releases), and extract it to the `~/.mujoco` directory;
+下载mujoco[安装包](https://github.com/google-deepmind/mujoco/releases), 解压到 `~/.mujoco` 目录下;
 
 ```
 cd unitree_mujoco/simulate/
 ln -s ~/.mujoco/mujoco-3.3.6 mujoco
 ```
 
-### 2. Compile unitree_mujoco
-```bash
-cd unitree_mujoco/simulate
+### 2. 编译 unitree_mujoco
+```
+cd unitree_mujoco/simulate/
 mkdir build && cd build
 cmake ..
 make -j4
 ```
-### 3. Test:
-Run:
+
+### 3. 测试:
+运行：
 ```bash
 ./unitree_mujoco -r go2 -s scene_terrain.xml
 ```
-You should see the mujoco simulator with the Go2 robot loaded.
-In a new terminal, run:
-```bash
+可以看到加载了 Go2 机器人的 mujoco 仿真器。
+
+在新的终端中运行：
+```
 ./test
 ```
-The program will output the robot's pose and position information in the simulator, and each motor of the robot will continuously output 1Nm of torque.
+程序会输出机器人在仿真器中的姿态和位置信息，同时机器人的每个电机都会持续输出 1Nm 的转矩。
 
-**Note:** The testing program sends the unitree_go message. If you want to test G1 robot, you need to modify the program to use the unitree_hg message.
+**注：** 测试程序发送的是 unitree_go 消息，如果需要测试 G1 机器人，需要修改程序使用 unitree_hg 消息。
 
-## Python Simulator (simulate_python)
-### 1. Dependencies
+## Python 仿真器 (simulate_python)
+### 1. 依赖
 #### unitree_sdk2_python
 ```bash
 cd ~
@@ -92,93 +98,97 @@ git clone https://github.com/unitreerobotics/unitree_sdk2_python.git
 cd unitree_sdk2_python
 pip3 install -e .
 ```
-If you encounter an error during installation:
+如果遇到问题：
 ```bash
 Could not locate cyclonedds. Try to set CYCLONEDDS_HOME or CMAKE_PREFIX_PATH
 ```
-Refer to: https://github.com/unitreerobotics/unitree_sdk2_python
+参考: https://github.com/unitreerobotics/unitree_sdk2_python
+
 #### mujoco-python
 ```bash
 pip3 install mujoco
 ```
-
 #### joystick
 ```bash
 pip3 install pygame
 ```
-
-### 2. Test
+### 2. 测试
 ```bash
 cd ./simulate_python
 python3 ./unitree_mujoco.py
 ```
-You should see the mujoco simulator with the Go2 robot loaded.
-In a new terminal, run:
+在新终端运行
 ```bash
 python3 ./test/test_unitree_sdk2.py
 ```
-The program will output the robot's pose and position information in the simulator, and each motor of the robot will continuously output 1Nm of torque.
+程序会输出机器人在仿真器中的姿态和位置信息，同时机器人的每个电机都会持续输出 1Nm 的转矩。
 
-**Note:** The testing program sends the unitree_go message. If you want to test G1 robot, you need to modify the program to use the unitree_hg message.
+**注：** 测试程序发送的是 unitree_go 消息，如果需要测试 G1 机器人，需要修改程序使用 unitree_hg 消息。
 
 
-# Usage
-## 1. Simulation Configuration
-### C++ Simulator
-The configuration file for the C++ simulator is located at `/simulate/config.yaml`:
+ 
+
+# 使用
+## 1. 仿真配置
+### c++ 仿真器
+c++ 仿真器的配置文件位于 `/simulate/config.yaml` 中：
 ```yaml
-# Robot name loaded by the simulator
+# 仿真器加载的机器人名称
 # "go2", "b2", "b2w", "h1"
 robot: "go2"
-# Robot simulation scene file
-# For example, for go2, it refers to the scene.xml file in the /unitree_robots/go2/ folder
-robot_scene: "scene.xml"
-# DDS domain id, it is recommended to distinguish from the real robot (default is 0 on the real robot)
-domain_id: 1
 
-use_joystick: 1 # Simulate Unitree WirelessController using a gamepad
-joystick_type: "xbox" # support "xbox" and "switch" gamepad layout
-joystick_device: "/dev/input/js0" # Device path
-joystick_bits: 16 # Some game controllers may only have 8-bit accuracy
+# 机器人仿真仿真场景文件
+# 以 go2 为例，指的是/unitree_robots/go2/文件夹下的 scene.xml 文件
+robot_scene: "scene.xml" 
 
-# Network interface name, for simulation, it is recommended to use the local loopback "lo"
+# dds domain id，最好与实物(实物上默认为 0)区分开
+domain_id: 1 
+# 网卡名称, 对于仿真建议使用本地回环 "lo"
 interface: "lo"
-# Whether to output robot link, joint, sensor information, 1 for output
+
+# 是否输出机器人连杆、关节、传感器等信息，1为输出
 print_scene_information: 1
-# Whether to use virtual tape, 1 to enable
-# Mainly used to simulate the hanging process of H1 robot initialization
-enable_elastic_band: 0 # For H1
+
+# 是否使用虚拟挂带, 1 为启用
+# 主要用于模拟 H1 机器人初始化挂起的过程 
+enable_elastic_band: 0 # For H1 
 ```
-### Python Simulator
-The configuration file for the Python simulator is located at `/simulate_python/config.py`:
+### python 仿真器
+python 仿真器的配置文件位于 `/simulate_python/config.py` 中：
 ```python
-# Robot name loaded by the simulator
+# 仿真器加载的机器人名称
 # "go2", "b2", "b2w", "h1"
-ROBOT = "go2"
-# Robot simulation scene file
-ROBOT_SCENE = "../unitree_robots/" + ROBOT + "/scene.xml"  # Robot scene
-# DDS domain id, it is recommended to distinguish from the real robot (default is 0 on the real robot)
-DOMAIN_ID = 1  # Domain id
-# Network interface name, for simulation, it is recommended to use the local loopback "lo"
-INTERFACE = "lo"  # Interface
-# Whether to output robot link, joint, sensor information, True for output
-PRINT_SCENE_INFORMATION = True
+ROBOT = "go2" 
+
+# 机器人仿真仿真场景文件
+ROBOT_SCENE = "../unitree_robots/" + ROBOT + "/scene.xml" # Robot scene
+
+# dds domain id，最好与实物(实物上默认为 0)区分开
+DOMAIN_ID = 1 # Domain id
+# 网卡名称, 对于仿真建议使用本地回环 "lo"
+INTERFACE = "lo" # Interface 
+
+# 是否输出机器人连杆、关节、传感器等信息，True 为输出
+PRINT_SCENE_INFORMATION = True 
 
 USE_JOYSTICK = 1 # Simulate Unitree WirelessController using a gamepad
 JOYSTICK_TYPE = "xbox" # support "xbox" and "switch" gamepad layout
 JOYSTICK_DEVICE = 0 # Joystick number
 
-# Whether to use virtual tape, 1 to enable
-# Mainly used to simulate the hanging process of H1 robot initialization
-ENABLE_ELASTIC_BAND = False
-# Simulation time step (unit: s)
-# To ensure the reliability of the simulation, it needs to be greater than the time required for viewer.sync() to render once
+# 是否使用虚拟挂带, 1 为启用
+# 主要用于模拟 H1 机器人初始化挂起的过程 
+ENABLE_ELASTIC_BAND = False 
+
+# 仿真步长 单位(s)
+# 为保证仿真的可靠性，需要大于 viewer.sync() 渲染一次所需要的时间
 SIMULATE_DT = 0.003  
-# Visualization interface runtime step, 0.02 corresponds to 50fps/s
-VIEWER_DT = 0.02
+
+# 可视化界面的运行步长，0.02 对应 50fps/s
+VIEWER_DT = 0.02 
 ```
-### Joystick
-The simulator will use an Xbox or Switch gamepad  to simulate the wireless controller of the robot. The button and joystick information of the wireless controller will be published through "rt/wireless_controller" topic. `use_joystick/USE_JOYSTICK` in `config.yaml/config.py` needs to be set to 0, when there is no gamepad. If your gamepad is not in Xbox or Switch layout, you can modify it in the source code (The button and joystick IDs can be  determined  using `jstest`):
+
+### 游戏手柄
+仿真器会使用 Xbox 或者 Switch 游戏来模拟机器人的无线控制器，并将手柄按键和摇杆信息发布在"rt/wireless_controller" topic。如果手上没有可以使用的游戏手柄，需要将 `config.yaml/config.py` 中的 `use_joystick/USE_JOYSTICK` 设置为 0。如果使用的手柄不属于 Xbox 和 Switch 映射，可以在源码中自行修改或添加(可以使用 `jstest` 工具查看按键和摇杆 id)：
 
 In `simulate/src/unitree_sdk2_bridge/unitree_sdk2_bridge.cc`: 
 ```C++
@@ -192,7 +202,7 @@ In `simulate/src/unitree_sdk2_bridge/unitree_sdk2_bridge.cc`:
     js_id_.axis["RT"] = 5; // Right trigger
     js_id_.axis["DX"] = 6; // Directional pad x
     js_id_.axis["DY"] = 7; // Directional pad y
-
+    
     js_id_.button["X"] = 2;
     js_id_.button["Y"] = 3;
     js_id_.button["B"] = 1;
@@ -229,82 +239,83 @@ if js_type == "xbox":
         "START": 7,
     }
 ```
+### 人形机器人虚拟挂带
+考虑到人形机器人不便于从平地上启动并进行调试，在仿真中设计了一个虚拟挂带，用于模拟人形机器人的吊起和放下。设置 `enable_elastic_band/ENABLE_ELASTIC_BAND = 1` 可以启用虚拟挂带。加载机器人后，按 `9` 启用或松开挂带，按 `7` 放下机器人，按 `8` 吊起机器人。
 
-### Elastic band for humanoid 
-Consider humanoid robots are not suitable for starting in ground, a virtual elastic band was designed to simulate the lifting and lowering of humanoid robots. Setting ` enable_elastic_mand/ENABLE_ELSTIC_BAND=1 ` can enable the virtual elastic band. After loading the robot, press' 9 'to activate or release the strap, press' 7' to lower the robot, and press' 8 'to lift the robot.
+## 2. 地形生成工具
+我们提供了一个在 mujoco 仿真器中参数化创建简单地形的工具，支持添加楼梯、杂乱地面、高程图等地形。程序位于 `terrain_tool` 文件夹中。具体的使用方法见 `terrain_tool` 文件夹下的 readme 文件。
+![](./doc/terrain.png)
 
-## 2. Terrain Generation Tool
-We provide a tool to parametrically create simple terrains in the mujoco simulator, including stairs, rough ground, and height maps. The program is located in the `terrain_tool` folder. For specific usage instructions, refer to the README file in the `terrain_tool` folder.
-![Terrain Generation Example](./doc/terrain.png)
+## 3. sim to real
+`example` 文件夹下提供了使用不同接口实现 Go2 机器人站起再趴下的简单例子。这些例子简演示了如何使用 Unitree 提供的接口实现仿真到实物的实现。下面是每个文件夹名称的解释：
+- `cpp`: 基于 `C++`, 使用 `unitree_sdk2` 接口
+- `python`: 基于 `python`，使用 `unitree_sdk2_python` 接口
+- `ros2`: 基于`ros2`，使用 `unitree_ros2` 接口
 
-## 3. Sim to Real
-The `example` folder contains simple examples of using different interfaces to make the Go2 robot stand up and then lie down. These examples demonstrate how to implement the transition from simulation to reality using interfaces provided by Unitree. Here is an explanation of each folder name:
-- `cpp`: Based on C++, using `unitree_sdk2` interface
-- `python`: Based on Python, using  `unitree_sdk2_python` interface
-- `ros2`: Based on ROS2, using `unitree_ros2` interface
-
-### unitree_sdk2
-1. Compile
+### unitree_sdk2 
+1. 编译运行
 ```bash
 cd example/cpp
 mkdir build && cd build
 cmake ..
 make -j4
 ```
-2. Run:
+运行：
 ```bash
-./stand_go2 # Control the robot in the simulation (make sure the Go2 simulation scene has been loaded)
-./stand_go2 enp3s0 # Control the physical robot, where enp3s0 is the name of the network card connected to the robot
+./stand_go2 # 控制仿真中的机器人 (需确保 Go2 仿真场景已经加载)
+./stand_go2 enp3s0 # 控制机器人实物，其中 enp3s0 为机器人所连接的网卡名称
 ```
-3. Sim to Real
-```cpp
+
+2. sim to real
+```C++
 if (argc < 2)
 {   
-    // If no network card is input, use the simulated domain id and the local network card
+    // 如果没有输入网卡，使用仿真的 domian id 和 网卡(本地)
     ChannelFactory::Instance()->Init(1, "lo");
 }
 else
 {   
-    // Otherwise, use the specified network card
+    // 否则使用指定的网卡
     ChannelFactory::Instance()->Init(0, argv[1]);
 }
 ```
+
 ### unitree_sdk2_python
-1. Run
+1. 运行：
 ```bash
-python3 ./stand_go2.py # Control the robot in the simulation (make sure the Go2 simulation scene has been loaded)
-python3 ./stand_go2.py enp3s0 # Control the physical robot, where enp3s0 is the name of the network card connected to the robot
+python3 ./stand_go2.py # 控制仿真中的机器人 (需确保 Go2 仿真场景已经加载)
+python3 ./stand_go2.py enp3s0 # 控制机器人实物，其中 enp3s0 为机器人所连接的网卡名称
 ```
-2. Sim to Real
+2. sim to real
+
 ```python
-if len(sys.argv) < 2:
-    // If no network card is input, use the simulated domain id and the local network card
+if len(sys.argv) <2:
+    // 如果没有输入网卡，使用仿真的 domian id 和 网卡(本地)
     ChannelFactoryInitialize(1, "lo")
 else:
-    // Otherwise, use the specified network card
+    // 否则使用指定的网卡
     ChannelFactoryInitialize(0, sys.argv[1])
 ```
 ### unitree_ros2
 
-1. Compile
-First, ensure that the unitree_ros2 environment has been properly configured, see [unitree_ros2](https://github.com/unitreerobotics/unitree_ros2).
-
+1. 编译安装
+首先确保已经正确配置好 unitree_ros2 环境，见 [unitree_ros2](https://github.com/unitreerobotics/unitree_ros2)。
 ```bash
 source ~/unitree_ros2/setup.sh
 cd example/ros2
 colcon build
 ```
 
-2. Run simulation
+2. 运行仿真
 ```bash
-source ~/unitree_ros2/setup_local.sh # Use the local network card
-export ROS_DOMAIN_ID=1 # Modify the domain id to match the simulation
-./install/stand_go2/bin/stand_go2 # Run
+source ~/unitree_ros2/setup_local.sh # 使用本地网卡
+export ROS_DOMAIN_ID=1 # 修改domain id 与仿真一致
+./install/stand_go2/bin/stand_go2 # 运行
 ```
 
-3. Run real robot
+3. 运行实物
 ```bash
-source ~/unitree_ros2/setup.sh # Use the network card connected to the robot
-export ROS_DOMAIN_ID=0 # Use the default domain id
-./install/stand_go2/bin/stand_go2 # Run
+source ~/unitree_ros2/setup.sh # 使用机器人连接的网卡
+export ROS_DOMAIN_ID=0 # 使用默认的 domain id 
+./install/stand_go2/bin/stand_go2 # 运行
 ```
