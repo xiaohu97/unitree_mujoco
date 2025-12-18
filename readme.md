@@ -76,13 +76,19 @@ make -j4
 ### 3. 测试:
 运行：
 ```bash
-./unitree_mujoco -r go2 -s scene_terrain.xml
+./unitree_mujoco 
 ```
-可以看到加载了 Go2 机器人的 mujoco 仿真器。
+
 
 在新的终端中运行：
 ```
-./test
+# 多关节正弦 + 多关节锁0位
+./g1_identifiaction --domain 0 --iface lo \
+  --sine 0,1,2,3,4,5,6,7,8,9,10,11 --amp 0.1 --period 1.0 --kp 80 --kd 3 \
+  --dirs 1,1,1,1,1,1,1,-1,-1,1,1,-1 \
+  --hold 12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29 --q_hold 0 --kp_hold 120 --kd_hold 5 \
+  --motors 35
+
 ```
 程序会输出机器人在仿真器中的姿态和位置信息，同时机器人的每个电机都会持续输出 1Nm 的转矩。
 

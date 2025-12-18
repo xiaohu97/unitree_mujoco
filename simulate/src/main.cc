@@ -76,8 +76,8 @@ public:
   }
 
 
-  double stiffness_ = 200;
-  double damping_ = 100;
+  double stiffness_ = 600;
+  double damping_ = 300;
   std::vector<double> point_ = {0, 0, 3};
   double length_ = 0.0;
   bool enable_ = true;
