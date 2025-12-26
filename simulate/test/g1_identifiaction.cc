@@ -49,7 +49,7 @@ static std::vector<int> ParseCSVInts(const std::string& s) {
   return out;
 }
 
-// Parse "1,-1,1" -> vector<double>
+// Parse "0.1,-0.2,0.0" -> vector<double>
 static std::vector<double> ParseCSVDoubles(const std::string& s) {
   std::vector<double> out;
   if (s.empty()) return out;
@@ -62,8 +62,17 @@ static std::vector<double> ParseCSVDoubles(const std::string& s) {
 }
 
 static double NormalizeSign(double x) {
-  // allow user pass -1/1, or any positive/negative number
   return (x >= 0.0) ? 1.0 : -1.0;
+}
+
+static void RequireSameSize(const std::vector<int>& a, const std::vector<double>& b,
+                            const std::string& a_name, const std::string& b_name) {
+  if (!b.empty() && b.size() != a.size()) {
+    std::cerr << "Error: " << b_name << " size must match " << a_name << " size. "
+              << a_name << " has " << a.size() << ", "
+              << b_name << " has " << b.size() << "\n";
+    std::exit(1);
+  }
 }
 
 int main(int argc, char** argv) {
@@ -72,27 +81,28 @@ int main(int argc, char** argv) {
   std::string iface = "lo";
 
   // Multiple joints
-  std::vector<int> sine_joints = {10};   // joints that follow sine
-  std::vector<int> hold_joints = {};     // joints that are locked at q=0
+  std::vector<int> sine_joints = {10};
+  std::vector<int> hold_joints = {};
 
-  // Sine params (shared by all sine joints)
-  double amp = 0.2;        // rad
-  double period = 1.5;     // s
+  // Sine params (shared)
+  double amp = 0.2;
+  double period = 1.5;
   double kp_sine = 40.0;
   double kd_sine = 2.0;
 
-  // Sine direction control:
-  //   --dir applies to all sine joints
-  //   --dirs provides per-joint signs, aligned with --sine order
+  // Sine direction
   double dir_all = 1.0;
-  std::vector<double> dirs_per_joint; // if non-empty, overrides dir_all
+  std::vector<double> dirs_per_joint;
 
-  // Hold params (fixed position)
-  double q_hold = 0.0;     // target position
+  // New: per-joint offsets/targets
+  std::vector<double> sine_offset;  // per sine joint, rad; added to q0 center
+  std::vector<double> hold_q;       // per hold joint, rad; absolute target
+
+  // Hold gains
   double kp_hold = 120.0;
   double kd_hold = 5.0;
 
-  // motor count (G1 常见 35；若你工程实际不一样改这里)
+  // motor count
   int motor_num = 35;
 
   // ===== argv parsing =====
@@ -109,26 +119,32 @@ int main(int argc, char** argv) {
 
     if (k == "--domain") domain_id = std::stoi(need_value(k));
     else if (k == "--iface") iface = need_value(k);
+
     else if (k == "--sine") sine_joints = ParseCSVInts(need_value(k));
     else if (k == "--hold") hold_joints = ParseCSVInts(need_value(k));
+
     else if (k == "--amp") amp = std::stod(need_value(k));
     else if (k == "--period") period = std::stod(need_value(k));
     else if (k == "--kp") kp_sine = std::stod(need_value(k));
     else if (k == "--kd") kd_sine = std::stod(need_value(k));
+
     else if (k == "--dir") dir_all = NormalizeSign(std::stod(need_value(k)));
     else if (k == "--dirs") dirs_per_joint = ParseCSVDoubles(need_value(k));
-    else if (k == "--q_hold") q_hold = std::stod(need_value(k));
+
+    // New: per-joint offsets/targets
+    else if (k == "--sine_offset") sine_offset = ParseCSVDoubles(need_value(k));
+    else if (k == "--hold_q") hold_q = ParseCSVDoubles(need_value(k));
+
     else if (k == "--kp_hold") kp_hold = std::stod(need_value(k));
     else if (k == "--kd_hold") kd_hold = std::stod(need_value(k));
     else if (k == "--motors") motor_num = std::stoi(need_value(k));
+
     else if (k == "--help") {
       std::cout <<
         "Usage:\n"
         "  ./g1_identifiaction --domain 1 --iface enp3s0 \\\n"
-        "    --sine 10,11 --amp 0.2 --period 1.5 --kp 40 --kd 2 --dir -1 \\\n"
-        "    --hold 0,1,2 --q_hold 0 --kp_hold 120 --kd_hold 5 --motors 35\n\n"
-        "Per-joint direction:\n"
-        "  ./g1_identifiaction ... --sine 10,11,12 --dirs 1,-1,1 ...\n";
+        "    --sine 10,11 --sine_offset 0.0,0.1 --amp 0.2 --period 1.5 --kp 40 --kd 2 --dirs 1,-1 \\\n"
+        "    --hold 0,1,2 --hold_q 0.0,0.0,0.5 --kp_hold 120 --kd_hold 5 --motors 35\n";
       return 0;
     }
   }
@@ -149,19 +165,22 @@ int main(int argc, char** argv) {
     }
   }
 
+  // size checks for per-joint vectors
+  RequireSameSize(sine_joints, dirs_per_joint, "sine", "dirs");
+  RequireSameSize(sine_joints, sine_offset, "sine", "sine_offset");
+  RequireSameSize(hold_joints, hold_q, "hold", "hold_q");
+
   // build signs aligned with sine_joints
   std::vector<double> sine_signs(sine_joints.size(), dir_all);
   if (!dirs_per_joint.empty()) {
-    if (dirs_per_joint.size() != sine_joints.size()) {
-      std::cerr << "Error: --dirs size must match --sine size. "
-                << "--sine has " << sine_joints.size()
-                << ", --dirs has " << dirs_per_joint.size() << "\n";
-      return 1;
-    }
     for (size_t i = 0; i < dirs_per_joint.size(); ++i) {
       sine_signs[i] = NormalizeSign(dirs_per_joint[i]);
     }
   }
+
+  // default offsets if not provided
+  if (sine_offset.empty()) sine_offset.assign(sine_joints.size(), 0.0);
+  if (hold_q.empty()) hold_q.assign(hold_joints.size(), 0.0);  // 默认锁在 0 rad
 
   // ===== init DDS =====
   ChannelFactory::Instance()->Init(domain_id, iface);
@@ -205,25 +224,28 @@ int main(int argc, char** argv) {
       cmd.motor_cmd()[i].tau() = 0.0;
     }
 
-    // time in seconds
     double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
-    // 2) Hold joints: fixed position
-    for (int j : hold_joints) {
+    // 2) Hold joints: per-joint target angle
+    for (size_t idx = 0; idx < hold_joints.size(); ++idx) {
+      int j = hold_joints[idx];
       if (j < 0 || j >= motor_num) continue;
-      cmd.motor_cmd()[j].q()   = q_hold;
+
+      cmd.motor_cmd()[j].q()   = hold_q[idx];  // 每个 hold 关节自己的目标角
       cmd.motor_cmd()[j].dq()  = 0.0;
       cmd.motor_cmd()[j].kp()  = kp_hold;
       cmd.motor_cmd()[j].kd()  = kd_hold;
       cmd.motor_cmd()[j].tau() = 0.0;
     }
 
-    // 3) Sine joints with direction sign
+    // 3) Sine joints: per-joint offset added to center
     for (size_t idx = 0; idx < sine_joints.size(); ++idx) {
       int j = sine_joints[idx];
       if (j < 0 || j >= motor_num) continue;
 
-      double qdes = q0_sine[idx]
+      double center = sine_offset[idx];
+
+      double qdes = center
                   + (sine_signs[idx] * amp) * std::sin(2.0 * M_PI * t / period);
 
       cmd.motor_cmd()[j].q()   = qdes;
