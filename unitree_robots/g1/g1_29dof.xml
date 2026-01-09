@@ -8,10 +8,10 @@
       <joint damping="0.05" armature="0.000001" frictionloss="0.2"/>
     </default>
     <default class="leg_motor">
-      <joint damping="0.05" armature="0.000001" frictionloss="0.2"/>
+      <joint damping="0.05" armature="0.5" frictionloss="0.2"/>
     </default>
     <default class="ankle_motor">
-      <joint damping="0.05" armature="0.000001" frictionloss="0.2"/>
+      <joint damping="0.05" armature="0.01" frictionloss="0.2"/>
     </default>
     <default class="arm_motor">
       <joint damping="0.05" armature="0.01" frictionloss="0.2"/>
