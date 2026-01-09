@@ -6,7 +6,7 @@ robot_scene: "scene_g1_29dof_terrain.xml"
 domain_id: 0  # Domain id  g1 0  go2 1
 interface: "lo" # Interface "lo" 表示使用本地回环接口（localhost），适合仿真环境。
 
-use_joystick: 0 # 启用游戏手柄模拟 Unitree 的无线控制器
+use_joystick: 1 # 启用游戏手柄模拟 Unitree 的无线控制器
 joystick_type: "xbox" # support "xbox" and "switch" gamepad layout
 joystick_device: "/dev/input/js0" # Device path
 joystick_bits: 16 # Some game controllers may only have 8-bit accuracy
