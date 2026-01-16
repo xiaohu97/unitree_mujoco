@@ -87,6 +87,10 @@ In a new terminal, run:
 
 ./g1_identifiaction --domain 0 --iface lo   --sine 0,1,2,3,4,5,6,7,8,9,10,11 --amp 0.1 --period 0.5 --kp 70 --kd 3   --sine_offset 0.9,0.4,-0.4,1.0,0.1,0.0,0.9,-0.4,0.4,1.0,0.1,0.0    --dirs 1,1,1,1,1,1,1,-1,-1,1,1,-1   --hold 12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29   --hold_q 0.0,0.0,0.0,0.0,0.2,0.0,1.4,0.0,0.0,0.0,0.0,-0.2,0.0,1.4,0.0,0.0,0.0,0.0   --kp_hold 120 --kd_hold 5   --motors 35
 ```
+
+```bash
+./g1_identifiaction --domain 0 --iface enp5s0   --sine 0,1,2,3,4,5,6,7,8,9,10,11 --amp 0.15 --period 0.2 --kp 35 --kd 2   --sine_offset -0.3,0.4,-0.4,1.0,0.1,0.0,-0.3,-0.4,0.4,1.0,0.1,0.0    --dirs 1,1,1,1,1,1,1,-1,-1,1,1,-1   --hold 12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29   --hold_q 0.0,0.0,0.0,0.0,0.2,0.0,1.4,0.0,0.0,0.0,0.0,-0.2,0.0,1.4,0.0,0.0,0.0,0.0   --kp_hold 50 --kd_hold 5   --motors 35 --dof 27
+```
 The program will output the robot's pose and position information in the simulator, and each motor of the robot will continuously output 1Nm of torque.
 
 **Note:** The testing program sends the unitree_go message. If you want to test G1 robot, you need to modify the program to use the unitree_hg message.
