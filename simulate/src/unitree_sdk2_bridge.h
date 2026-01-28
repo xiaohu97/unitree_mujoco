@@ -73,6 +73,10 @@ public:
 protected:
     int num_motor_ = 0;
     int dim_motor_sensor_ = 0;
+    // 添加接触状态定义
+    #define CONTACT_UNKNOWN 0
+    #define CONTACT_MADE 1
+    #define CONTACT_LOST 2
 
     mjData *mj_data_;
     mjModel *mj_model_;
@@ -89,6 +93,78 @@ protected:
     int secondary_imu_acc_adr_ = -1;
 
     std::shared_ptr<unitree::common::UnitreeJoystick> joystick = nullptr;
+        // 添加脚部body名称
+    std::vector<std::string> foot_link_names_;
+    std::vector<int> foot_body_ids_;
+
+        // 检测接触状态的通用方法
+    std::vector<int16_t> detectFootContacts(double force_threshold = 0.5)
+    {
+        std::vector<int16_t> contact_states(foot_body_ids_.size(), CONTACT_UNKNOWN);
+        
+        if (foot_body_ids_.empty()) {
+            return contact_states;
+        }
+        
+        // 初始化所有脚为无接触
+        std::vector<bool> contact_detected(foot_body_ids_.size(), false);
+        
+        // 遍历所有接触点
+        for (int i = 0; i < mj_data_->ncon; i++) {
+            int geom1 = mj_data_->contact[i].geom1;
+            int geom2 = mj_data_->contact[i].geom2;
+            
+            int body1 = (geom1 >= 0) ? mj_model_->geom_bodyid[geom1] : -1;
+            int body2 = (geom2 >= 0) ? mj_model_->geom_bodyid[geom2] : -1;
+            
+            // 忽略自碰撞
+            if (body1 >= 0 && body1 == body2) continue;
+            
+            // 计算接触力
+            mjtNum force6[6] = {0};
+            mj_contactForce(mj_model_, mj_data_, i, force6);
+            
+            double fx = static_cast<double>(force6[0]);
+            double fy = static_cast<double>(force6[1]);
+            double fz = static_cast<double>(force6[2]);
+            double force_magnitude = std::sqrt(fx*fx + fy*fy + fz*fz);
+            
+            // 检查是否超过力阈值
+            if (force_magnitude > force_threshold) {
+                for (size_t j = 0; j < foot_body_ids_.size(); j++) {
+                    if (body1 == foot_body_ids_[j] || body2 == foot_body_ids_[j]) {
+                        contact_detected[j] = true;
+                    }
+                }
+            }
+        }
+        
+        // 转换为接触状态
+        for (size_t i = 0; i < contact_detected.size(); i++) {
+            contact_states[i] = contact_detected[i] ? CONTACT_MADE : CONTACT_LOST;
+        }
+        
+        return contact_states;
+    }
+    
+    // 初始化脚部body IDs
+    void initFootBodies(const std::vector<std::string>& foot_names)
+    {
+        foot_link_names_ = foot_names;
+        foot_body_ids_.clear();
+        
+        for (const auto& name : foot_names) {
+            int body_id = mj_name2id(mj_model_, mjOBJ_BODY, name.c_str());
+            if (body_id >= 0) {
+                foot_body_ids_.push_back(body_id);
+                if(param::config.print_scene_information == 1) {
+                    std::cout << "Found foot body: " << name << " (id: " << body_id << ")" << std::endl;
+                }
+            } else {
+                std::cerr << "Warning: Foot body '" << name << "' not found in model" << std::endl;
+            }
+        }
+    }
 
     void _check_sensor()
     {
@@ -256,6 +332,42 @@ private:
 
 using Go2Bridge = RobotBridge<unitree::robot::go2::subscription::LowCmd, unitree::robot::go2::publisher::LowState>;
 
+// 为Go2添加特化版本
+class Go2BridgeWithContact : public Go2Bridge
+{
+public:
+    Go2BridgeWithContact(mjModel *model, mjData *data) : Go2Bridge(model, data)
+    {
+        // Go2是四足机器人，初始化4个脚
+        // 根据你的URDF/MJCF模型调整这些名称
+        std::vector<std::string> go2_feet = {
+            "FL_foot",  // 左前脚
+            "FR_foot",  // 右前脚
+            "RL_foot",  // 左后脚
+            "RR_foot"   // 右后脚
+        };
+        initFootBodies(go2_feet);
+    }
+    
+    void run() override
+    {
+        Go2Bridge::run();
+        
+        // 添加接触检测到highstate发布
+        if (highstate->trylock()) {
+            // 检测脚底接触
+            auto contacts = detectFootContacts(0.5); // 0.5N阈值
+            
+            // 填充foot_force数组（Go2有4个脚）
+            for (size_t i = 0; i < contacts.size() && i < 4; i++) {
+                highstate->msg_.foot_force()[i] = contacts[i];
+            }
+            
+            highstate->unlockAndPublish();
+        }
+    }
+};
+
 class G1Bridge : public RobotBridge<unitree::robot::g1::subscription::LowCmd, unitree::robot::g1::publisher::LowState>
 {
 public:
@@ -268,6 +380,13 @@ public:
                 g1_lowstate->msg_.mode_machine() = scene.find("23") != std::string::npos ? 4 : 5;
             }
         }
+        // G1是人形机器人，初始化2个脚
+        // 根据你的URDF/MJCF模型调整这些名称
+        std::vector<std::string> g1_feet = {
+            "left_ankle_roll_link",   // 左脚
+            "right_ankle_roll_link"   // 右脚
+        };
+        initFootBodies(g1_feet);
 
         bmsstate = std::make_unique<BmsState_t>("rt/lf/bmsstate");
         bmsstate->msg_.soc() = 100;
@@ -278,6 +397,31 @@ public:
     void run() override
     {
         RobotBridge::run();
+         // highstate接触检测
+        if (highstate->trylock()) {
+            if(frame_pos_adr_ >= 0) {
+                highstate->msg_.position()[0] = mj_data_->sensordata[frame_pos_adr_ + 0];
+                highstate->msg_.position()[1] = mj_data_->sensordata[frame_pos_adr_ + 1];
+                highstate->msg_.position()[2] = mj_data_->sensordata[frame_pos_adr_ + 2];
+            }
+            if(frame_vel_adr_ >= 0) {
+                highstate->msg_.velocity()[0] = mj_data_->sensordata[frame_vel_adr_ + 0];
+                highstate->msg_.velocity()[1] = mj_data_->sensordata[frame_vel_adr_ + 1];
+                highstate->msg_.velocity()[2] = mj_data_->sensordata[frame_vel_adr_ + 2];
+            }
+            
+            // 添加脚底接触检测
+            auto contacts = detectFootContacts(0.5); // 0.5N阈值
+            for (size_t i = 0; i < contacts.size() && i < 4; i++) {
+                highstate->msg_.foot_force()[i] = contacts[i];
+            }
+            // 未使用的位置填0
+            for (size_t i = contacts.size(); i < 4; i++) {
+                highstate->msg_.foot_force()[i] = 0;
+            }
+            
+            highstate->unlockAndPublish();
+        }
 
         // secondary IMU state
         if (secondary_imustate->trylock()) {
