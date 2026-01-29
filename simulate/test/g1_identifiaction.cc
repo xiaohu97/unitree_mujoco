@@ -20,6 +20,29 @@
 using namespace unitree::robot;
 using namespace unitree::common;
 
+static uint32_t crc32_core(const uint32_t* ptr, uint32_t len) {  // size_t → uint32_t
+  uint32_t xbit = 0;
+  uint32_t data = 0;                    // ✅ 声明并初始化
+  uint32_t CRC32 = 0xFFFFFFFF;
+  const uint32_t dwPolynomial = 0x04c11db7;
+  for (uint32_t i = 0; i < len; i++) {
+    xbit = 1 << 31;
+    data = ptr[i];                      // ✅ 使用 data
+    for (uint32_t bits = 0; bits < 32; bits++) {
+      if (CRC32 & 0x80000000) {
+        CRC32 <<= 1;
+        CRC32 ^= dwPolynomial;
+      } else {
+        CRC32 <<= 1;
+      }
+      if (data & xbit) CRC32 ^= dwPolynomial;
+      xbit >>= 1;
+    }
+  }
+  return CRC32;  // ❌ 官方不做最终 XOR
+}
+
+
 // Unitree 常用“停止标志”
 static constexpr double PosStopF = 2.146e9;
 static constexpr double VelStopF = 16000.0;
@@ -104,6 +127,7 @@ int main(int argc, char** argv) {
 
   // motor count
   int motor_num = 35;
+  int robot_dof = 29;  // 默认 29 DOF
 
   // ===== argv parsing =====
   for (int i = 1; i < argc; ++i) {
@@ -138,6 +162,7 @@ int main(int argc, char** argv) {
     else if (k == "--kp_hold") kp_hold = std::stod(need_value(k));
     else if (k == "--kd_hold") kd_hold = std::stod(need_value(k));
     else if (k == "--motors") motor_num = std::stoi(need_value(k));
+    else if (k == "--dof") robot_dof = std::stoi(need_value(k));
 
     else if (k == "--help") {
       std::cout <<
@@ -195,7 +220,7 @@ int main(int argc, char** argv) {
   while (!g_got_state.load(std::memory_order_acquire)) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-
+  std::cout << "got lowstate\n";
   // capture each sine joint's center position from initial state
   std::vector<double> q0_sine(sine_joints.size(), 0.0);
   {
@@ -211,10 +236,17 @@ int main(int argc, char** argv) {
   }
 
   auto t0 = std::chrono::steady_clock::now();
+  // 这里可以根据需要改成 5 / 6，或者做成命令行参数
+  const uint8_t kModePr = 0;   // 视你的系统定义而定，通常 0 表示普通过程
+  // const uint8_t kModeMachine = 6;  // 5: 29-DOF, 6: 27-DOF
+  uint8_t kModeMachine = 5;  // default 29-DOF
+  if (robot_dof == 27) kModeMachine = 6;
 
   while (true) {
     unitree_hg::msg::dds_::LowCmd_ cmd{};
-
+    // 设置整机模式相关字段
+    cmd.mode_pr(kModePr);
+    cmd.mode_machine(kModeMachine);
     // 1) Default: stop all motors
     for (int i = 0; i < motor_num; ++i) {
       cmd.motor_cmd()[i].q()   = PosStopF;
@@ -231,6 +263,7 @@ int main(int argc, char** argv) {
       int j = hold_joints[idx];
       if (j < 0 || j >= motor_num) continue;
 
+      cmd.motor_cmd()[j].mode() = 1;  // 启用电机
       cmd.motor_cmd()[j].q()   = hold_q[idx];  // 每个 hold 关节自己的目标角
       cmd.motor_cmd()[j].dq()  = 0.0;
       cmd.motor_cmd()[j].kp()  = kp_hold;
@@ -248,12 +281,20 @@ int main(int argc, char** argv) {
       double qdes = center
                   + (sine_signs[idx] * amp) * std::sin(2.0 * M_PI * t / period);
 
-      cmd.motor_cmd()[j].q()   = qdes;
-      cmd.motor_cmd()[j].dq()  = 0.0;
-      cmd.motor_cmd()[j].kp()  = kp_sine;
-      cmd.motor_cmd()[j].kd()  = kd_sine;
+      cmd.motor_cmd()[j].mode() = 1;  // 启用电机
+      cmd.motor_cmd()[j].q() = qdes;
+      cmd.motor_cmd()[j].dq() = 0.0;
+      cmd.motor_cmd()[j].kp() = kp_sine;
+      cmd.motor_cmd()[j].kd() = kd_sine;
       cmd.motor_cmd()[j].tau() = 0.0;
+
     }
+      // Unitree 标准 CRC32 计算：对前 N-1 个 uint32_t 字段做校验，最后一个 crc 字段除外
+    uint32_t* cmd_ptr = reinterpret_cast<uint32_t*>(&cmd);
+    size_t cmd_size_words = (sizeof(cmd) / sizeof(uint32_t)) - 1;  // 减去 crc 字段本身
+    
+    uint32_t crc = crc32_core((uint32_t*)&cmd, cmd_size_words);
+    cmd.crc(crc);
 
     lowcmd_puber.Write(cmd);
     usleep(2000); // ~500 Hz
