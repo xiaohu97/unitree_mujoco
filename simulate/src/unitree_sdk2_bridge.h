@@ -303,6 +303,14 @@ public:
         }
         // highstate
         if(highstate->trylock()) {
+            {
+                double sim_time = mj_data_->time;
+                int64_t sec = static_cast<int64_t>(sim_time);
+                int64_t nsec = static_cast<int64_t>((sim_time - static_cast<double>(sec)) * 1e9);
+                if (nsec < 0) nsec = 0;
+                highstate->msg_.stamp().sec() = sec;
+                highstate->msg_.stamp().nanosec() = nsec;
+            }
             if(frame_pos_adr_ >= 0) {
                 highstate->msg_.position()[0] = mj_data_->sensordata[frame_pos_adr_ + 0];
                 highstate->msg_.position()[1] = mj_data_->sensordata[frame_pos_adr_ + 1];
@@ -355,6 +363,14 @@ public:
         
         // 添加接触检测到highstate发布
         if (highstate->trylock()) {
+            {
+                double sim_time = mj_data_->time;
+                int64_t sec = static_cast<int64_t>(sim_time);
+                int64_t nsec = static_cast<int64_t>((sim_time - static_cast<double>(sec)) * 1e9);
+                if (nsec < 0) nsec = 0;
+                highstate->msg_.stamp().sec() = sec;
+                highstate->msg_.stamp().nanosec() = nsec;
+            }
             // 检测脚底接触
             auto contacts = detectFootContacts(0.5); // 0.5N阈值
             
@@ -399,6 +415,14 @@ public:
         RobotBridge::run();
          // highstate接触检测
         if (highstate->trylock()) {
+            {
+                double sim_time = mj_data_->time;
+                int64_t sec = static_cast<int64_t>(sim_time);
+                int64_t nsec = static_cast<int64_t>((sim_time - static_cast<double>(sec)) * 1e9);
+                if (nsec < 0) nsec = 0;
+                highstate->msg_.stamp().sec() = sec;
+                highstate->msg_.stamp().nanosec() = nsec;
+            }
             if(frame_pos_adr_ >= 0) {
                 highstate->msg_.position()[0] = mj_data_->sensordata[frame_pos_adr_ + 0];
                 highstate->msg_.position()[1] = mj_data_->sensordata[frame_pos_adr_ + 1];
