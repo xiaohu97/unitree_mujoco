@@ -4,3 +4,9 @@
 **/log/
 **/install/
 simulate/mujoco
+
+# 数据文件 (太大，不上传)
+data/
+*.dat
+*.csv
+*.npy

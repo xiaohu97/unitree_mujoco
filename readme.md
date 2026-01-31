@@ -79,6 +79,14 @@ make -j4
 ./unitree_mujoco 
 ```
 
+采集用于训练的数据
+```
+# 采集30秒数据到指定变体目录
+python3 tools/collect_identification_data.py ./data/varied_scenes/var_0000 --duration 30
+
+python3 tools/collect_identification_data.py ./data/var_0000 \
+    --process-only ./data/varied_scenes/var_0000/raw_data_20260130_123456.csv
+```
 
 在新的终端中运行：
 ```
