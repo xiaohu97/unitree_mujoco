@@ -10,6 +10,8 @@
 #include <unitree/idl/hg/IMUState_.hpp>
 
 #include <iostream>
+#include <array>
+#include <cmath>
 
 #include "param.h"
 #include "physics_joystick.h"
@@ -145,6 +147,79 @@ protected:
         }
         
         return contact_states;
+    }
+
+    // 计算脚底六维力 [fx fy fz mx my mz]（世界坐标系，力矩关于脚部body原点）
+    std::vector<std::array<double, 6>> computeFootWrenches()
+    {
+        std::vector<std::array<double, 6>> wrenches(foot_body_ids_.size(), {0, 0, 0, 0, 0, 0});
+
+        if (foot_body_ids_.empty()) {
+            return wrenches;
+        }
+
+        for (int i = 0; i < mj_data_->ncon; i++) {
+            int geom1 = mj_data_->contact[i].geom1;
+            int geom2 = mj_data_->contact[i].geom2;
+
+            int body1 = (geom1 >= 0) ? mj_model_->geom_bodyid[geom1] : -1;
+            int body2 = (geom2 >= 0) ? mj_model_->geom_bodyid[geom2] : -1;
+
+            // 忽略自碰撞
+            if (body1 >= 0 && body1 == body2) continue;
+
+            mjtNum force6[6] = {0};
+            mj_contactForce(mj_model_, mj_data_, i, force6);
+
+            // contact frame -> world frame
+            const mjtNum* frame = mj_data_->contact[i].frame;
+            double fx_c = static_cast<double>(force6[0]);
+            double fy_c = static_cast<double>(force6[1]);
+            double fz_c = static_cast<double>(force6[2]);
+
+            double fx_w = frame[0] * fx_c + frame[1] * fy_c + frame[2] * fz_c;
+            double fy_w = frame[3] * fx_c + frame[4] * fy_c + frame[5] * fz_c;
+            double fz_w = frame[6] * fx_c + frame[7] * fy_c + frame[8] * fz_c;
+
+            const mjtNum* pos = mj_data_->contact[i].pos;
+
+            for (size_t j = 0; j < foot_body_ids_.size(); j++) {
+                int foot_body = foot_body_ids_[j];
+                int sign = 0;
+                if (body1 == foot_body) {
+                    sign = 1;
+                } else if (body2 == foot_body) {
+                    sign = -1;
+                }
+                if (sign == 0) continue;
+
+                double fx = sign * fx_w;
+                double fy = sign * fy_w;
+                double fz = sign * fz_w;
+
+                double bx = mj_data_->xpos[3 * foot_body + 0];
+                double by = mj_data_->xpos[3 * foot_body + 1];
+                double bz = mj_data_->xpos[3 * foot_body + 2];
+
+                double rx = static_cast<double>(pos[0]) - bx;
+                double ry = static_cast<double>(pos[1]) - by;
+                double rz = static_cast<double>(pos[2]) - bz;
+
+                // torque = r x f
+                double mx = ry * fz - rz * fy;
+                double my = rz * fx - rx * fz;
+                double mz = rx * fy - ry * fx;
+
+                wrenches[j][0] += fx;
+                wrenches[j][1] += fy;
+                wrenches[j][2] += fz;
+                wrenches[j][3] += mx;
+                wrenches[j][4] += my;
+                wrenches[j][5] += mz;
+            }
+        }
+
+        return wrenches;
     }
     
     // 初始化脚部body IDs
@@ -373,10 +448,10 @@ public:
             }
             // 检测脚底接触
             auto contacts = detectFootContacts(0.5); // 0.5N阈值
-            
-            // 填充foot_force数组（Go2有4个脚）
-            for (size_t i = 0; i < contacts.size() && i < 4; i++) {
-                highstate->msg_.foot_force()[i] = contacts[i];
+
+            // 旧字段布局：使用 foot_force(int16[4]) 填充接触状态
+            for (size_t i = 0; i < 4; i++) {
+                highstate->msg_.foot_force()[i] = (i < contacts.size()) ? contacts[i] : 0;
             }
             
             highstate->unlockAndPublish();
@@ -434,14 +509,26 @@ public:
                 highstate->msg_.velocity()[2] = mj_data_->sensordata[frame_vel_adr_ + 2];
             }
             
-            // 添加脚底接触检测
+            // 添加脚底接触检测（旧字段布局）
             auto contacts = detectFootContacts(0.5); // 0.5N阈值
-            for (size_t i = 0; i < contacts.size() && i < 4; i++) {
-                highstate->msg_.foot_force()[i] = contacts[i];
+            for (size_t i = 0; i < 4; i++) {
+                highstate->msg_.foot_force()[i] = (i < contacts.size()) ? contacts[i] : 0;
             }
-            // 未使用的位置填0
-            for (size_t i = contacts.size(); i < 4; i++) {
-                highstate->msg_.foot_force()[i] = 0;
+
+            // 临时复用 foot_speed_body(float[12]) 存放六维力
+            auto wrenches = computeFootWrenches();
+            for (size_t i = 0; i < 12; i++) {
+                highstate->msg_.foot_speed_body()[i] = 0;
+            }
+            if (wrenches.size() >= 1) {
+                for (size_t k = 0; k < 6; k++) {
+                    highstate->msg_.foot_speed_body()[k] = static_cast<float>(wrenches[0][k]);
+                }
+            }
+            if (wrenches.size() >= 2) {
+                for (size_t k = 0; k < 6; k++) {
+                    highstate->msg_.foot_speed_body()[6 + k] = static_cast<float>(wrenches[1][k]);
+                }
             }
             
             highstate->unlockAndPublish();

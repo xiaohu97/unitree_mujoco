@@ -148,8 +148,9 @@ class G1DataCollector:
             position_mode = getattr(msg, 'position_mode', 0)
             velocity_mode = getattr(msg, 'velocity_mode', 0)
             angular_speed = getattr(msg, 'angular_speed', 0.0)
+            # 旧字段布局：foot_force(int16[4])用于接触；foot_speed_body(float[12])临时承载六维力
             foot_contact = msg.foot_force[:4] if len(msg.foot_force) >= 4 else [0] * 4
-            foot_force = msg.foot_force + [0] * (12 - len(msg.foot_force)) if len(msg.foot_force) < 12 else msg.foot_force[:12]
+            foot_force = msg.foot_speed_body + [0] * (12 - len(msg.foot_speed_body)) if len(msg.foot_speed_body) < 12 else msg.foot_speed_body[:12]
             foot_position_body = msg.foot_position_body + [0] * (12 - len(msg.foot_position_body)) if len(msg.foot_position_body) < 12 else msg.foot_position_body[:12]
 
             odom_row = [
