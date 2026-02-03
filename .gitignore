@@ -4,6 +4,7 @@
 **/log/
 **/install/
 simulate/mujoco
+unitree_robots/unitree_sdk2/
 
 # 数据文件 (太大，不上传)
 data/
