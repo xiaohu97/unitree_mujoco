@@ -453,7 +453,7 @@ class G1ForceEEDataCollector:
 
             'g1_robot_tau.dat': [f'low_motor_{i}_tau_est' for i in range(num_motors)],
 
-            'g1_robot_contact.dat': ['odom_foot_force_1', 'odom_foot_force_2'],
+            'g1_robot_contact.dat': ['odom_foot_contact_1', 'odom_foot_contact_2'],
 
             # 新增：末端接触力（左脚6 + 右脚6）
             'g1_robot_ee_force.dat': [

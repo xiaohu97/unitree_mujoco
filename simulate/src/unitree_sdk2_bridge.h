@@ -396,6 +396,7 @@ public:
                 highstate->msg_.velocity()[1] = mj_data_->sensordata[frame_vel_adr_ + 1];
                 highstate->msg_.velocity()[2] = mj_data_->sensordata[frame_vel_adr_ + 2];
             }
+            updateHighStateExtra();
             highstate->unlockAndPublish();
         }
         // wireless_controller
@@ -411,6 +412,9 @@ public:
     
 private:
     unitree::common::RecurrentThreadPtr thread_;
+
+protected:
+    virtual void updateHighStateExtra() {}
 };
 
 using Go2Bridge = RobotBridge<unitree::robot::go2::subscription::LowCmd, unitree::robot::go2::publisher::LowState>;
@@ -432,29 +436,15 @@ public:
         initFootBodies(go2_feet);
     }
     
-    void run() override
+protected:
+    void updateHighStateExtra() override
     {
-        Go2Bridge::run();
-        
-        // 添加接触检测到highstate发布
-        if (highstate->trylock()) {
-            {
-                double sim_time = mj_data_->time;
-                int64_t sec = static_cast<int64_t>(sim_time);
-                int64_t nsec = static_cast<int64_t>((sim_time - static_cast<double>(sec)) * 1e9);
-                if (nsec < 0) nsec = 0;
-                highstate->msg_.stamp().sec() = sec;
-                highstate->msg_.stamp().nanosec() = nsec;
-            }
-            // 检测脚底接触
-            auto contacts = detectFootContacts(0.5); // 0.5N阈值
+        // 检测脚底接触
+        auto contacts = detectFootContacts(0.5); // 0.5N阈值
 
-            // 旧字段布局：使用 foot_force(int16[4]) 填充接触状态
-            for (size_t i = 0; i < 4; i++) {
-                highstate->msg_.foot_force()[i] = (i < contacts.size()) ? contacts[i] : 0;
-            }
-            
-            highstate->unlockAndPublish();
+        // 旧字段布局：使用 foot_force(int16[4]) 填充接触状态
+        for (size_t i = 0; i < 4; i++) {
+            highstate->msg_.foot_force()[i] = (i < contacts.size()) ? contacts[i] : 0;
         }
     }
 };
@@ -488,51 +478,6 @@ public:
     void run() override
     {
         RobotBridge::run();
-         // highstate接触检测
-        if (highstate->trylock()) {
-            {
-                double sim_time = mj_data_->time;
-                int64_t sec = static_cast<int64_t>(sim_time);
-                int64_t nsec = static_cast<int64_t>((sim_time - static_cast<double>(sec)) * 1e9);
-                if (nsec < 0) nsec = 0;
-                highstate->msg_.stamp().sec() = sec;
-                highstate->msg_.stamp().nanosec() = nsec;
-            }
-            if(frame_pos_adr_ >= 0) {
-                highstate->msg_.position()[0] = mj_data_->sensordata[frame_pos_adr_ + 0];
-                highstate->msg_.position()[1] = mj_data_->sensordata[frame_pos_adr_ + 1];
-                highstate->msg_.position()[2] = mj_data_->sensordata[frame_pos_adr_ + 2];
-            }
-            if(frame_vel_adr_ >= 0) {
-                highstate->msg_.velocity()[0] = mj_data_->sensordata[frame_vel_adr_ + 0];
-                highstate->msg_.velocity()[1] = mj_data_->sensordata[frame_vel_adr_ + 1];
-                highstate->msg_.velocity()[2] = mj_data_->sensordata[frame_vel_adr_ + 2];
-            }
-            
-            // 添加脚底接触检测（旧字段布局）
-            auto contacts = detectFootContacts(0.5); // 0.5N阈值
-            for (size_t i = 0; i < 4; i++) {
-                highstate->msg_.foot_force()[i] = (i < contacts.size()) ? contacts[i] : 0;
-            }
-
-            // 临时复用 foot_speed_body(float[12]) 存放六维力
-            auto wrenches = computeFootWrenches();
-            for (size_t i = 0; i < 12; i++) {
-                highstate->msg_.foot_speed_body()[i] = 0;
-            }
-            if (wrenches.size() >= 1) {
-                for (size_t k = 0; k < 6; k++) {
-                    highstate->msg_.foot_speed_body()[k] = static_cast<float>(wrenches[0][k]);
-                }
-            }
-            if (wrenches.size() >= 2) {
-                for (size_t k = 0; k < 6; k++) {
-                    highstate->msg_.foot_speed_body()[6 + k] = static_cast<float>(wrenches[1][k]);
-                }
-            }
-            
-            highstate->unlockAndPublish();
-        }
 
         // secondary IMU state
         if (secondary_imustate->trylock()) {
@@ -569,6 +514,32 @@ public:
 
         // In practice, bmsstate is sent at a low frequency; here it is sent with the main loop
         bmsstate->unlockAndPublish();
+    }
+
+protected:
+    void updateHighStateExtra() override
+    {
+        // 添加脚底接触检测（旧字段布局）
+        auto contacts = detectFootContacts(0.5); // 0.5N阈值
+        for (size_t i = 0; i < 4; i++) {
+            highstate->msg_.foot_force()[i] = (i < contacts.size()) ? contacts[i] : 0;
+        }
+
+        // 临时复用 foot_speed_body(float[12]) 存放六维力
+        auto wrenches = computeFootWrenches();
+        for (size_t i = 0; i < 12; i++) {
+            highstate->msg_.foot_speed_body()[i] = 0;
+        }
+        if (wrenches.size() >= 1) {
+            for (size_t k = 0; k < 6; k++) {
+                highstate->msg_.foot_speed_body()[k] = static_cast<float>(wrenches[0][k]);
+            }
+        }
+        if (wrenches.size() >= 2) {
+            for (size_t k = 0; k < 6; k++) {
+                highstate->msg_.foot_speed_body()[6 + k] = static_cast<float>(wrenches[1][k]);
+            }
+        }
     }
 
     using BmsState_t = unitree::robot::RealTimePublisher<unitree_hg::msg::dds_::BmsState_>;
