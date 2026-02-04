@@ -84,11 +84,12 @@ make -j4
 # 采集10秒数据到指定变体目录 会自动转化为dat文件
 python3 tools/collect_identification_data.py ./data/varied_scenes/var_0025 --duration 10
 
-# 采集用于参数辨识的数据 
-python3 tools/collect_identification_data.py ~/humanoid/ustc-humanoid-identification/data/0204force --duration 10
-
 python3 tools/collect_identification_data.py ./data/var_0000 \
     --process-only ./data/varied_scenes/var_0000/raw_data_20260130_123456.csv
+
+# 采集用于参数辨识的数据 
+python3 tools/collect_identification_forceee_data.py ~/humanoid/ustc-humanoid-identification/data/0204force --duration 10
+
 ```
 
 在新的终端中运行：
