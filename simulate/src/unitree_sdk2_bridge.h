@@ -172,14 +172,16 @@ protected:
             mj_contactForce(mj_model_, mj_data_, i, force6);
 
             // contact frame -> world frame
+            // frame is row-major [normal; t1; t2], so R_contact_to_world = frame^T
+            // f_world = frame^T @ f_contact, i.e. use columns of frame
             const mjtNum* frame = mj_data_->contact[i].frame;
             double fx_c = static_cast<double>(force6[0]);
             double fy_c = static_cast<double>(force6[1]);
             double fz_c = static_cast<double>(force6[2]);
 
-            double fx_w = frame[0] * fx_c + frame[1] * fy_c + frame[2] * fz_c;
-            double fy_w = frame[3] * fx_c + frame[4] * fy_c + frame[5] * fz_c;
-            double fz_w = frame[6] * fx_c + frame[7] * fy_c + frame[8] * fz_c;
+            double fx_w = frame[0] * fx_c + frame[3] * fy_c + frame[6] * fz_c;
+            double fy_w = frame[1] * fx_c + frame[4] * fy_c + frame[7] * fz_c;
+            double fz_w = frame[2] * fx_c + frame[5] * fy_c + frame[8] * fz_c;
 
             const mjtNum* pos = mj_data_->contact[i].pos;
 
@@ -187,9 +189,9 @@ protected:
                 int foot_body = foot_body_ids_[j];
                 int sign = 0;
                 if (body1 == foot_body) {
-                    sign = 1;
+                    sign = -1;  // force is on body2, negate for body1
                 } else if (body2 == foot_body) {
-                    sign = -1;
+                    sign = 1;   // force is already on body2 (foot)
                 }
                 if (sign == 0) continue;
 

@@ -88,7 +88,7 @@ python3 tools/collect_identification_data.py ./data/var_0000 \
     --process-only ./data/varied_scenes/var_0000/raw_data_20260130_123456.csv
 
 # 采集用于参数辨识的数据 
-python3 tools/collect_identification_forceee_data.py ~/humanoid/ustc-humanoid-identification/data/0204force --duration 10
+python3 tools/collect_identification_forceee_data.py ~/humanoid/ustc-humanoid-identification/data/stand0207 --duration 10
 
 ```
 
