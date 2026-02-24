@@ -347,8 +347,15 @@ class G1ForceEEDataCollector:
             lambda seg: self._process_segment(seg, timestamp_col, time_scale)
         )
 
-        # 更新接触状态
-        print("更新接触状态...")
+        # 备份 detectFootContacts(0.5) 的原始接触状态到 odom_foot_contact_3/4
+        print("备份sim接触状态到 odom_foot_contact_3/4...")
+        if 'odom_foot_contact_1' in df.columns:
+            df['odom_foot_contact_3'] = df['odom_foot_contact_1'].copy()
+        if 'odom_foot_contact_2' in df.columns:
+            df['odom_foot_contact_4'] = df['odom_foot_contact_2'].copy()
+
+        # 更新接触状态（用tau估计覆盖odom_foot_contact_1/2）
+        print("更新接触状态（tau估计）...")
         if 'low_motor_3_tau_est' in df.columns:
             df['odom_foot_contact_1'] = np.where(
                 df['low_motor_3_tau_est'] <= -0.5, 1,
@@ -454,6 +461,9 @@ class G1ForceEEDataCollector:
             'g1_robot_tau.dat': [f'low_motor_{i}_tau_est' for i in range(num_motors)],
 
             'g1_robot_contact.dat': ['odom_foot_contact_1', 'odom_foot_contact_2'],
+
+            # detectFootContacts(0.5) 的原始接触状态
+            'g1_robot_sim_contact.dat': ['odom_foot_contact_3', 'odom_foot_contact_4'],
 
             # 新增：末端接触力（左脚6 + 右脚6）
             'g1_robot_ee_force.dat': [
