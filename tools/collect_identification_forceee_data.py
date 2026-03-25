@@ -6,7 +6,7 @@ G1机器人惯性参数辨识数据采集（含末端接触力）
 - 临时旧字段布局下，将脚底六维力写入 g1_robot_ee_force.dat
 
 使用方法:
-    python collect_identification_forceee_data.py <output_dir> [--duration 30] [--domain-id 0]
+    python collect_identification_forceee_data.py <output_dir> [--duration 30] [--domain-id 0] [--dof-mode 12dof|27dof]
 """
 
 import sys
@@ -30,12 +30,47 @@ except ImportError:
     sys.exit(1)
 
 
+DOF_MODE_PRESETS = {
+    "12dof": {"motor_count": 12, "dat_motors": 12},
+    "27dof": {"motor_count": 27, "dat_motors": 27},
+}
+
+
+def normalize_dof_mode(dof_mode: str):
+    aliases = {
+        "12": "12dof",
+        "12dof": "12dof",
+        "12-dof": "12dof",
+        "27": "27dof",
+        "27dof": "27dof",
+        "27-dof": "27dof",
+    }
+    normalized = aliases.get(dof_mode.lower())
+    if normalized is None:
+        supported = ", ".join(sorted(DOF_MODE_PRESETS.keys()))
+        raise ValueError(f"未知 dof 模式: {dof_mode}. 支持: {supported}")
+    return normalized
+
+
+def resolve_motor_settings(dof_mode=None, motor_count=None, dat_motors=None):
+    if dof_mode is None:
+        resolved_motor_count = 35 if motor_count is None else motor_count
+        resolved_dat_motors = 12 if dat_motors is None else dat_motors
+        return None, resolved_motor_count, resolved_dat_motors
+
+    normalized_mode = normalize_dof_mode(dof_mode)
+    preset = DOF_MODE_PRESETS[normalized_mode]
+    resolved_motor_count = preset["motor_count"] if motor_count is None else motor_count
+    resolved_dat_motors = preset["dat_motors"] if dat_motors is None else dat_motors
+    return normalized_mode, resolved_motor_count, resolved_dat_motors
+
+
 class G1ForceEEDataCollector:
     """G1机器人数据采集器（含末端接触力）"""
 
     def __init__(self, output_dir: str, duration: float = 30.0,
                  domain_id: int = 0, interface: str = "lo",
-                 motor_count: int = 35):
+                 motor_count: int = 35, dat_motors: int = 12):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -43,6 +78,7 @@ class G1ForceEEDataCollector:
         self.domain_id = domain_id
         self.interface = interface
         self.motor_count = motor_count
+        self.dat_motors = dat_motors
 
         # 数据缓存
         self.odom_data = None
@@ -250,6 +286,8 @@ class G1ForceEEDataCollector:
         print(f"采集时长: {self.duration} 秒")
         print(f"Domain ID: {self.domain_id}")
         print(f"网络接口: {self.interface}")
+        print(f"采集电机数: {self.motor_count}")
+        print(f"导出DAT电机数: {self.dat_motors}")
         print()
 
         self._open_csv()
@@ -512,7 +550,7 @@ class G1ForceEEDataCollector:
         processed_path = self.process_csv(csv_path)
 
         # 3. 转换为DAT
-        self.csv_to_dat(processed_path)
+        self.csv_to_dat(processed_path, num_motors=self.dat_motors)
 
         print(f"\n{'='*60}")
         print(f"数据采集完成！")
@@ -534,6 +572,9 @@ def main():
   # 采集30秒数据到指定目录
   python collect_identification_forceee_data.py ./data/varied_scenes/var_0000 --duration 30
 
+  # 采集并导出 27DoF 数据
+  python collect_identification_forceee_data.py ./data/var_0027 --duration 30 --dof-mode 27dof
+
   # 使用不同的domain_id
   python collect_identification_forceee_data.py ./data/test --duration 20 --domain-id 1
 
@@ -550,21 +591,37 @@ def main():
                         help='DDS Domain ID，默认0')
     parser.add_argument('--interface', type=str, default='lo',
                         help='网络接口，默认lo')
-    parser.add_argument('--motor-count', type=int, default=35,
-                        help='电机数量，默认35')
-    parser.add_argument('--dat-motors', type=int, default=12,
-                        help='DAT文件中包含的电机数量，默认12')
+    parser.add_argument('--dof-mode', type=str, default=None,
+                        help='快捷切换 12dof/27dof；会联动设置 motor-count 和 dat-motors')
+    parser.add_argument('--motor-count', type=int, default=None,
+                        help='采集时记录的电机数量；若设置了 --dof-mode，则默认跟随 dof 预设')
+    parser.add_argument('--dat-motors', type=int, default=None,
+                        help='DAT文件中导出的电机数量；若设置了 --dof-mode，则默认跟随 dof 预设')
     parser.add_argument('--process-only', type=str, default=None,
                         help='只处理已有的CSV文件，不进行采集')
 
     args = parser.parse_args()
+    try:
+        dof_mode, motor_count, dat_motors = resolve_motor_settings(
+            dof_mode=args.dof_mode,
+            motor_count=args.motor_count,
+            dat_motors=args.dat_motors,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if dat_motors > motor_count:
+        parser.error(
+            f"dat_motors ({dat_motors}) 不能大于 motor_count ({motor_count})"
+        )
 
     collector = G1ForceEEDataCollector(
         output_dir=args.output_dir,
         duration=args.duration,
         domain_id=args.domain_id,
         interface=args.interface,
-        motor_count=args.motor_count
+        motor_count=motor_count,
+        dat_motors=dat_motors,
     )
 
     if args.process_only:
@@ -574,7 +631,7 @@ def main():
             print(f"错误: 文件不存在: {csv_path}")
             sys.exit(1)
         processed = collector.process_csv(csv_path)
-        collector.csv_to_dat(processed, num_motors=args.dat_motors)
+        collector.csv_to_dat(processed, num_motors=dat_motors)
     else:
         # 完整采集流程
         success = collector.run()
