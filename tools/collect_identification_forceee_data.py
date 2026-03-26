@@ -6,7 +6,7 @@ G1机器人惯性参数辨识数据采集（含末端接触力）
 - 临时旧字段布局下，将脚底六维力写入 g1_robot_ee_force.dat
 
 使用方法:
-    python collect_identification_forceee_data.py <output_dir> [--duration 30] [--domain-id 0] [--dof-mode 12dof|27dof]
+    python collect_identification_forceee_data.py <output_dir> [--duration 30] [--domain-id 0] [--dof-mode 12dof|29dof|27dof]
 """
 
 import sys
@@ -32,6 +32,7 @@ except ImportError:
 
 DOF_MODE_PRESETS = {
     "12dof": {"motor_count": 12, "dat_motors": 12},
+    "29dof": {"motor_count": 29, "dat_motors": 29},
     "27dof": {"motor_count": 27, "dat_motors": 27},
 }
 
@@ -41,6 +42,9 @@ def normalize_dof_mode(dof_mode: str):
         "12": "12dof",
         "12dof": "12dof",
         "12-dof": "12dof",
+        "29": "29dof",
+        "29dof": "29dof",
+        "29-dof": "29dof",
         "27": "27dof",
         "27dof": "27dof",
         "27-dof": "27dof",
@@ -572,7 +576,10 @@ def main():
   # 采集30秒数据到指定目录
   python collect_identification_forceee_data.py ./data/varied_scenes/var_0000 --duration 30
 
-  # 采集并导出 27DoF 数据
+  # 采集并导出 29DoF 数据
+  python collect_identification_forceee_data.py ./data/var_0029 --duration 30 --dof-mode 29dof
+
+  # 兼容旧的 lock-waist / 27DoF 数据
   python collect_identification_forceee_data.py ./data/var_0027 --duration 30 --dof-mode 27dof
 
   # 使用不同的domain_id
@@ -592,7 +599,7 @@ def main():
     parser.add_argument('--interface', type=str, default='lo',
                         help='网络接口，默认lo')
     parser.add_argument('--dof-mode', type=str, default=None,
-                        help='快捷切换 12dof/27dof；会联动设置 motor-count 和 dat-motors')
+                        help='快捷切换 12dof/29dof/27dof；会联动设置 motor-count 和 dat-motors')
     parser.add_argument('--motor-count', type=int, default=None,
                         help='采集时记录的电机数量；若设置了 --dof-mode，则默认跟随 dof 预设')
     parser.add_argument('--dat-motors', type=int, default=None,
