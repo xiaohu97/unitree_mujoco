@@ -1,5 +1,8 @@
 <mujoco model="g1_29dof scene">
   <include file="g1_29dof.xml"/>
+  <!-- <include file="g1_29dof_changearmature.xml"/> -->
+  <!-- <include file="g1_29dof_changetorso.xml"/> -->
+  <!-- <include file="g1_29dof_changewrist.xml"/> -->
 
   <statistic center="0 0 0.5" extent="2.0"/>
 
