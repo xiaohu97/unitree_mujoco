@@ -59,6 +59,17 @@ ISAAC_27DOF_JOINTS = (
     "right_wrist_pitch_joint",
 )
 
+LEFT_ARM_JOINTS = (
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+)
+LEFT_ARM_COMMAND_DIM = 2 * len(LEFT_ARM_JOINTS) + 1
+
 URDF_12DOF_JOINTS = (
     "left_hip_roll_joint",
     "left_hip_yaw_joint",
@@ -138,6 +149,155 @@ class RobotProfile:
     @property
     def observation_dim(self) -> int:
         return 9 + 3 * self.dof
+
+
+class GamepadCommandSource:
+    """Poll an SDL-mapped gamepad without blocking the MuJoCo control loop."""
+
+    AXIS_MAX = 32768.0
+    RECONNECT_PERIOD = 1.0
+
+    def __init__(self, index: int, deadzone: float):
+        try:
+            import pygame
+            from pygame._sdl2 import controller
+        except ImportError as exc:
+            raise RuntimeError(
+                "Gamepad control requires pygame. Install it with `pip install pygame`."
+            ) from exc
+
+        self._pygame = pygame
+        self._controller_module = controller
+        self.index = index
+        self.deadzone = deadzone
+        self._controller = None
+        self._next_connect_attempt = 0.0
+        self._waiting_reported = False
+        self._previous_y = False
+        self._previous_x = False
+        self._previous_stop = False
+        self.left_arm_toggle_requested = False
+        self.enabled = True
+        self.connected = False
+
+        self._controller_module.init()
+        self._try_connect()
+
+    def _try_connect(self) -> None:
+        now = time.monotonic()
+        if now < self._next_connect_attempt:
+            return
+        self._next_connect_attempt = now + self.RECONNECT_PERIOD
+
+        try:
+            self._controller_module.update()
+            if (
+                self.index >= self._controller_module.get_count()
+                or not self._controller_module.is_controller(self.index)
+            ):
+                if not self._waiting_reported:
+                    print(
+                        f"Gamepad {self.index} is unavailable or has no SDL mapping; "
+                        "waiting for a controller."
+                    )
+                    self._waiting_reported = True
+                return
+            self._controller = self._controller_module.Controller(self.index)
+        except (self._pygame.error, self._controller_module.error) as exc:
+            if not self._waiting_reported:
+                print(f"Cannot open gamepad {self.index}: {exc}; waiting for a controller.")
+                self._waiting_reported = True
+            return
+
+        self.connected = True
+        self._waiting_reported = False
+        self._previous_y = False
+        self._previous_x = False
+        self._previous_stop = False
+        self.left_arm_toggle_requested = False
+        state = "enabled" if self.enabled else "disabled; press Y to enable"
+        print(f"Gamepad connected: {self._controller.name} ({state}).")
+
+    def _disconnect(self) -> None:
+        if self._controller is not None:
+            try:
+                self._controller.quit()
+            except self._pygame.error:
+                pass
+        self._controller = None
+        self.connected = False
+        self.enabled = False
+        self._previous_y = False
+        self._previous_x = False
+        self._previous_stop = False
+        self.left_arm_toggle_requested = False
+        self._next_connect_attempt = 0.0
+        if not self._waiting_reported:
+            print("Gamepad disconnected: command cleared; reconnect and press Y to enable.")
+            self._waiting_reported = True
+
+    def _axis(self, axis: int) -> float:
+        assert self._controller is not None
+        value = float(np.clip(self._controller.get_axis(axis) / self.AXIS_MAX, -1.0, 1.0))
+        magnitude = abs(value)
+        if magnitude <= self.deadzone:
+            return 0.0
+        return float(np.copysign((magnitude - self.deadzone) / (1.0 - self.deadzone), value))
+
+    def poll(self, mode: str) -> np.ndarray:
+        self.left_arm_toggle_requested = False
+        zero_command = np.zeros(3, dtype=np.float64)
+        if self._controller is None:
+            self._try_connect()
+            if self._controller is None:
+                return zero_command
+
+        try:
+            self._controller_module.update()
+            if not self._controller.attached():
+                self._disconnect()
+                return zero_command
+
+            y_pressed = bool(self._controller.get_button(self._pygame.CONTROLLER_BUTTON_Y))
+            x_pressed = bool(self._controller.get_button(self._pygame.CONTROLLER_BUTTON_X))
+            stop_pressed = bool(
+                self._controller.get_button(self._pygame.CONTROLLER_BUTTON_LEFTSHOULDER)
+                and self._controller.get_button(self._pygame.CONTROLLER_BUTTON_RIGHTSHOULDER)
+            )
+            if stop_pressed and not self._previous_stop:
+                self.enabled = False
+                print("Gamepad LB+RB: command cleared and gamepad control disabled.")
+            elif y_pressed and not self._previous_y:
+                self.enabled = not self.enabled
+                print(f"Gamepad control: {'ON' if self.enabled else 'OFF (command cleared)'}.")
+            if x_pressed and not self._previous_x and not stop_pressed:
+                self.left_arm_toggle_requested = True
+            self._previous_y = y_pressed
+            self._previous_x = x_pressed
+            self._previous_stop = stop_pressed
+
+            if not self.enabled:
+                return zero_command
+
+            left_x = self._axis(self._pygame.CONTROLLER_AXIS_LEFTX)
+            left_y = self._axis(self._pygame.CONTROLLER_AXIS_LEFTY)
+            right_x = self._axis(self._pygame.CONTROLLER_AXIS_RIGHTX)
+        except (self._pygame.error, self._controller_module.error):
+            self._disconnect()
+            return zero_command
+
+        if mode == "stand":
+            return np.asarray((-left_y, -0.5 * left_x, 0.5 * right_x), dtype=np.float64)
+
+        forward = -left_y
+        vx = forward * (1.0 if forward >= 0.0 else 0.6)
+        return np.asarray((vx, -0.5 * left_x, 1.57 * right_x), dtype=np.float64)
+
+    def close(self) -> None:
+        if self._controller is not None:
+            self._controller.quit()
+            self._controller = None
+        self._controller_module.quit()
 
 
 def _gain_for_joint(name: str) -> tuple[float, float, float]:
@@ -246,6 +406,107 @@ def quaternion_to_rotation_matrix(quaternion: np.ndarray) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def policy_input_dim(policy: torch.jit.ScriptModule) -> int:
+    """Read the actor input width from the exported TorchScript policy."""
+    state_dict = policy.state_dict()
+    first_layer = state_dict.get("actor.0.weight")
+    if first_layer is None or first_layer.ndim != 2:
+        raise RuntimeError(
+            "Cannot determine policy input size: actor.0.weight is missing from policy.pt."
+        )
+    return int(first_layer.shape[1])
+
+
+class LeftArmTrajectory:
+    """Reproduce the 15-D left-arm command used by the Isaac Lab task."""
+
+    def __init__(
+        self,
+        traj_path: Path,
+        profile: RobotProfile,
+        enabled: bool,
+        period: float = 6.0,
+        blend_time: float = 2.0,
+        ref_vel_scale: float = 0.25,
+    ):
+        if profile.dof != 27:
+            raise ValueError("Left-arm trajectory policies require the 27-DOF robot.")
+        if not traj_path.is_file():
+            raise FileNotFoundError(f"Left-arm trajectory CSV not found: {traj_path}")
+
+        with traj_path.open("r", encoding="utf-8") as file:
+            header = file.readline().strip().split(",")
+        raw = np.loadtxt(traj_path, delimiter=",", skiprows=1)
+        column_indices = [header.index(name) for name in LEFT_ARM_JOINTS]
+        samples = raw[:, column_indices]
+
+        sample_count = samples.shape[0]
+        coefficients = np.fft.rfft(samples, axis=0)
+        self.cos_coeff = (2.0 / sample_count) * coefficients.real
+        self.sin_coeff = (-2.0 / sample_count) * coefficients.imag
+        self.cos_coeff[0] *= 0.5
+        if sample_count % 2 == 0:
+            self.cos_coeff[-1] *= 0.5
+            self.sin_coeff[-1] = 0.0
+
+        harmonics = np.arange(coefficients.shape[0], dtype=np.float64)
+        self.omega = 2.0 * np.pi * harmonics / period
+        joint_index = {name: index for index, name in enumerate(profile.joint_names)}
+        self.default_q = np.asarray(
+            [profile.default_joint_pos[joint_index[name]] for name in LEFT_ARM_JOINTS],
+            dtype=np.float64,
+        )
+        self.period = period
+        self.blend_time = blend_time
+        self.ref_vel_scale = ref_vel_scale
+        self.default_enabled = enabled
+        self.enabled = enabled
+        self.elapsed = 0.0
+
+    def reset(self) -> None:
+        self.enabled = self.default_enabled
+        self.elapsed = 0.0
+
+    def toggle(self) -> None:
+        self.enabled = not self.enabled
+        if self.enabled:
+            self.elapsed = 0.0
+
+    def advance(self, dt: float) -> None:
+        self.elapsed += dt
+
+    def observation(self) -> np.ndarray:
+        if not self.enabled:
+            return np.zeros(LEFT_ARM_COMMAND_DIM, dtype=np.float32)
+
+        phase = self.elapsed % self.period
+        angles = phase * self.omega
+        cosines = np.cos(angles)
+        sines = np.sin(angles)
+        q_traj = cosines @ self.cos_coeff + sines @ self.sin_coeff
+        dq_traj = (
+            -(sines * self.omega) @ self.cos_coeff
+            + (cosines * self.omega) @ self.sin_coeff
+        )
+        delta = q_traj - self.default_q
+
+        if self.blend_time > 0.0:
+            u = np.clip(self.elapsed / self.blend_time, 0.0, 1.0)
+            alpha = 6.0 * u**5 - 15.0 * u**4 + 10.0 * u**3
+            alpha_dot = (
+                30.0 * u**4 - 60.0 * u**3 + 30.0 * u**2
+            ) / self.blend_time
+        else:
+            alpha = 1.0
+            alpha_dot = 0.0
+
+        q_ref_rel = alpha * delta
+        dq_ref = alpha_dot * delta + alpha * dq_traj
+        return np.concatenate(
+            (q_ref_rel, dq_ref * self.ref_vel_scale, np.ones(1))
+        ).astype(np.float32)
 
 
 class ElasticBand:
@@ -358,6 +619,8 @@ class HumanoidUltraSim2Sim:
         dof: int,
         policy_path: Path,
         command: np.ndarray,
+        left_arm_traj_path: Path | None,
+        left_arm_enabled: bool,
         elastic_band_enabled: bool,
         band_lift: float,
         band_anchor_height: float,
@@ -413,14 +676,36 @@ class HumanoidUltraSim2Sim:
             self.model.jnt_range[self.model.joint(name).id] = limits
         self.policy = torch.jit.load(str(policy_path), map_location="cpu")
         self.policy.eval()
+        input_dim = policy_input_dim(self.policy)
+        if input_dim % self.HISTORY_LENGTH != 0:
+            raise RuntimeError(
+                f"Policy input size {input_dim} is not divisible by history length "
+                f"{self.HISTORY_LENGTH}."
+            )
+        frame_observation_dim = input_dim // self.HISTORY_LENGTH
+        if frame_observation_dim == self.profile.observation_dim:
+            self.left_arm_trajectory = None
+        elif frame_observation_dim == self.profile.observation_dim + LEFT_ARM_COMMAND_DIM:
+            trajectory_path = left_arm_traj_path or Path(__file__).with_name(
+                "left_wrist_pitch_traj.csv"
+            )
+            self.left_arm_trajectory = LeftArmTrajectory(
+                trajectory_path.resolve(), self.profile, left_arm_enabled
+            )
+        else:
+            raise RuntimeError(
+                "Unsupported policy observation size: "
+                f"{frame_observation_dim} per frame ({input_dim} total). Expected "
+                f"{self.profile.observation_dim} for standard stand/locomotion or "
+                f"{self.profile.observation_dim + LEFT_ARM_COMMAND_DIM} for stand-leftarm."
+            )
         self.command = command.astype(np.float64)
         self.previous_action = np.zeros(self.profile.dof, dtype=np.float64)
         self.target_joint_pos = self.profile.default_joint_pos.copy()
         self.observation_history: deque[np.ndarray] = deque(maxlen=self.HISTORY_LENGTH)
 
-        expected_input = self.profile.observation_dim * self.HISTORY_LENGTH
         with torch.inference_mode():
-            test_output = self.policy(torch.zeros(1, expected_input, dtype=torch.float32))
+            test_output = self.policy(torch.zeros(1, input_dim, dtype=torch.float32))
         if not isinstance(test_output, torch.Tensor) or tuple(test_output.shape) != (1, self.profile.dof):
             raise RuntimeError(
                 f"Policy shape mismatch: expected [1, {self.profile.dof}], got "
@@ -445,6 +730,8 @@ class HumanoidUltraSim2Sim:
         self.previous_action.fill(0.0)
         self.target_joint_pos[:] = self.profile.default_joint_pos
         self.observation_history.clear()
+        if self.left_arm_trajectory is not None:
+            self.left_arm_trajectory.reset()
         mujoco.mj_forward(self.model, self.data)
         self.elastic_band.reset_anchors(self.data)
 
@@ -454,16 +741,17 @@ class HumanoidUltraSim2Sim:
         body_angular_velocity = self.data.sensor("BodyGyro").data.copy()
         body_rotation = quaternion_to_rotation_matrix(self.data.qpos[3:7])
         projected_gravity = body_rotation.T @ np.asarray([0.0, 0.0, -1.0])
-        observation = np.concatenate(
-            (
-                body_angular_velocity,
-                projected_gravity,
-                self.command,
-                joint_pos - self.profile.default_joint_pos,
-                joint_vel,
-                self.previous_action,
-            )
-        )
+        observation_parts = [
+            body_angular_velocity,
+            projected_gravity,
+            self.command,
+            joint_pos - self.profile.default_joint_pos,
+            joint_vel,
+            self.previous_action,
+        ]
+        if self.left_arm_trajectory is not None:
+            observation_parts.append(self.left_arm_trajectory.observation())
+        observation = np.concatenate(observation_parts)
         return np.clip(observation, -100.0, 100.0).astype(np.float32)
 
     def update_policy(self) -> None:
@@ -511,11 +799,15 @@ class HumanoidUltraSim2Sim:
         for _ in range(steps):
             self.physics_step()
         self.observation_history.clear()
+        if self.left_arm_trajectory is not None:
+            self.left_arm_trajectory.reset()
 
     def control_step(self) -> None:
         self.update_policy()
         for _ in range(self.CONTROL_DECIMATION):
             self.physics_step()
+        if self.left_arm_trajectory is not None:
+            self.left_arm_trajectory.advance(self.SIM_DT * self.CONTROL_DECIMATION)
 
 
 def parse_args() -> argparse.Namespace:
@@ -549,6 +841,29 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Stand mode torso pitch command.",
     )
+    parser.add_argument(
+        "--left-arm-traj",
+        type=Path,
+        default=None,
+        help=(
+            "Trajectory CSV for a stand-leftarm policy. Defaults to "
+            "left_wrist_pitch_traj.csv next to this script."
+        ),
+    )
+    arm_group = parser.add_mutually_exclusive_group()
+    arm_group.add_argument(
+        "--left-arm-track",
+        dest="left_arm_enabled",
+        action="store_true",
+        help="Start a stand-leftarm policy with trajectory tracking enabled.",
+    )
+    arm_group.add_argument(
+        "--no-left-arm-track",
+        dest="left_arm_enabled",
+        action="store_false",
+        help="Start a stand-leftarm policy with its arm command disabled.",
+    )
+    parser.set_defaults(left_arm_enabled=True)
     parser.add_argument(
         "--stand-seconds",
         type=float,
@@ -585,8 +900,27 @@ def parse_args() -> argparse.Namespace:
         default=0.3,
         help="Fraction of robot weight supported by the two shoulder bands.",
     )
+    parser.add_argument(
+        "--gamepad",
+        action="store_true",
+        help="Read policy commands from an SDL-mapped gamepad using pygame.",
+    )
+    parser.add_argument("--gamepad-index", type=int, default=0, help="SDL gamepad device index.")
+    parser.add_argument(
+        "--gamepad-deadzone",
+        type=float,
+        default=0.08,
+        help="Normalized joystick deadzone in [0, 1).",
+    )
     parser.add_argument("--headless", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.gamepad_index < 0:
+        parser.error("--gamepad-index must be non-negative")
+    if not 0.0 <= args.gamepad_deadzone < 1.0:
+        parser.error("--gamepad-deadzone must be in [0, 1)")
+    if args.gamepad and args.headless:
+        parser.error("--gamepad cannot be combined with --headless")
+    return args
 
 
 def main() -> None:
@@ -600,6 +934,8 @@ def main() -> None:
     else:
         command = np.asarray([args.vx, args.vy, args.yaw_rate], dtype=np.float64)
         command = np.clip(command, (-0.6, -0.5, -1.57), (1.0, 0.5, 1.57))
+    if args.gamepad:
+        command.fill(0.0)
     elastic_band_enabled = args.elastic_band_enabled
     if elastic_band_enabled is None:
         elastic_band_enabled = args.mode == "locomotion"
@@ -608,6 +944,8 @@ def main() -> None:
         dof=args.dof,
         policy_path=args.policy.resolve(),
         command=command,
+        left_arm_traj_path=args.left_arm_traj,
+        left_arm_enabled=args.left_arm_enabled,
         elastic_band_enabled=elastic_band_enabled,
         band_lift=args.band_lift,
         band_anchor_height=args.band_anchor_height,
@@ -616,6 +954,14 @@ def main() -> None:
         band_support_ratio=args.band_support_ratio,
     )
     simulator.stand(args.stand_seconds)
+    gamepad = (
+        GamepadCommandSource(args.gamepad_index, args.gamepad_deadzone)
+        if args.gamepad
+        else None
+    )
+    if simulator.left_arm_trajectory is not None:
+        state = "ON" if simulator.left_arm_trajectory.enabled else "OFF"
+        print(f"Left-arm trajectory: {state} (L toggles tracking).")
     if args.mode == "stand":
         print(
             f"Loaded {args.dof}-DOF stand policy. Command: "
@@ -649,6 +995,11 @@ def main() -> None:
 
     def print_status() -> None:
         band_status = "ON" if simulator.elastic_band.enabled else "OFF"
+        arm_status = (
+            "N/A"
+            if simulator.left_arm_trajectory is None
+            else "ON" if simulator.left_arm_trajectory.enabled else "OFF"
+        )
         if args.mode == "stand":
             command_status = (
                 f"height={simulator.command[0]:.2f}, "
@@ -659,10 +1010,23 @@ def main() -> None:
                 f"vx={simulator.command[0]:.2f}, "
                 f"vy={simulator.command[1]:.2f}, yaw={simulator.command[2]:.2f}"
             )
+        if gamepad is None:
+            gamepad_status = "OFF"
+        elif not gamepad.connected:
+            gamepad_status = "DISCONNECTED"
+        else:
+            gamepad_status = "ON" if gamepad.enabled else "DISABLED"
         print(
             f"command {command_status} | "
-            f"band={band_status}, length={simulator.elastic_band.length:.2f}m"
+            f"band={band_status}, length={simulator.elastic_band.length:.2f}m, "
+            f"left_arm={arm_status}, gamepad={gamepad_status}"
         )
+
+    def toggle_left_arm() -> None:
+        if simulator.left_arm_trajectory is None:
+            print("This policy has no left-arm trajectory observation.")
+        else:
+            simulator.left_arm_trajectory.toggle()
 
     def key_callback(keycode: int) -> None:
         handled = True
@@ -692,6 +1056,8 @@ def main() -> None:
             simulator.elastic_band.adjust_length(0.1)
         elif keycode in (ord("9"), ord("B"), ord("b")):
             simulator.elastic_band.toggle()
+        elif keycode in (ord("L"), ord("l")):
+            toggle_left_arm()
         else:
             handled = False
         if handled:
@@ -703,20 +1069,38 @@ def main() -> None:
     else:
         print("Move: W/S or Up/Down, A/D lateral, Q/E or Left/Right yaw.")
     print("Band: 7 shorter/raise, 8 longer/lower, 9/B release or attach.")
+    if simulator.left_arm_trajectory is not None:
+        print("Left arm: L toggles trajectory tracking or returns to the default pose.")
     print("Other: X/Space stop, R reset and restore the default band state.")
+    if gamepad is not None:
+        if args.mode == "stand":
+            print("Gamepad: left Y=height, left X=roll, right X=pitch.")
+        else:
+            print("Gamepad: left Y=vx, left X=vy, right X=yaw rate.")
+        print("Gamepad buttons: Y toggles control; X toggles the left-arm trajectory.")
+        print("Gamepad safety: LB+RB clears the command and disables control.")
     print_status()
-    with mujoco.viewer.launch_passive(
-        simulator.model, simulator.data, key_callback=key_callback
-    ) as viewer:
-        while viewer.is_running():
-            step_start = time.perf_counter()
-            simulator.control_step()
-            viewer.sync()
-            if args.duration > 0.0 and time.perf_counter() - start_time >= args.duration:
-                break
-            sleep_time = control_dt - (time.perf_counter() - step_start)
-            if sleep_time > 0.0:
-                time.sleep(sleep_time)
+    try:
+        with mujoco.viewer.launch_passive(
+            simulator.model, simulator.data, key_callback=key_callback
+        ) as viewer:
+            while viewer.is_running():
+                step_start = time.perf_counter()
+                if gamepad is not None:
+                    simulator.command[:] = gamepad.poll(args.mode)
+                    if gamepad.left_arm_toggle_requested:
+                        toggle_left_arm()
+                        print_status()
+                simulator.control_step()
+                viewer.sync()
+                if args.duration > 0.0 and time.perf_counter() - start_time >= args.duration:
+                    break
+                sleep_time = control_dt - (time.perf_counter() - step_start)
+                if sleep_time > 0.0:
+                    time.sleep(sleep_time)
+    finally:
+        if gamepad is not None:
+            gamepad.close()
 
 
 if __name__ == "__main__":
