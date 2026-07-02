@@ -813,7 +813,15 @@ class HumanoidUltraSim2Sim:
         """Cycle to the next policy, restarting its observation history."""
         self.active_policy_index = (self.active_policy_index + 1) % len(self.policy_entries)
         self.observation_history.clear()
-        self.previous_action.fill(0.0)
+        # Reverse-solve the action that holds the current posture so the new
+        # policy's observation is self-consistent and its first target does not
+        # jump away from the measured joint positions.
+        joint_pos = self.data.qpos[self.qpos_indices]
+        self.previous_action = np.clip(
+            (joint_pos - self.profile.default_joint_pos) / self.ACTION_SCALE,
+            -100.0,
+            100.0,
+        ).astype(np.float64)
         self.command[:] = 0.0
         if self.left_arm_trajectory is not None:
             self.left_arm_trajectory.reset()
