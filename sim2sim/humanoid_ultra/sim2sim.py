@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run a Humanoid Ultra Isaac Lab policy in MuJoCo."""
+"""Run Humanoid Ultra Isaac Lab policies in MuJoCo.
+
+Without --policy this loads the default stand and walk policies together:
+gamepad X (or keyboard P) switches between them, and gamepad LT+B (or
+keyboard 0) stops inference and latches kd-only damping until reset (R).
+"""
 
 from __future__ import annotations
 
@@ -12,6 +17,16 @@ from pathlib import Path
 import mujoco
 import numpy as np
 import torch
+
+
+DEFAULT_STAND_POLICY = Path(
+    "/home/zxh/unitree_rl_lab/logs/rsl_rl/humanoidultra27dof_stand_leftarm/"
+    "2026-06-30_19-24-09/exported/policy.pt"
+)
+DEFAULT_WALK_POLICY = Path(
+    "/home/zxh/unitree_rl_lab/logs/rsl_rl/humanoidultra27dof_flat/"
+    "2026-06-13_12-19-18/exported/policy.pt"
+)
 
 
 ISAAC_12DOF_JOINTS = (
@@ -135,6 +150,13 @@ TRAINING_POSITION_LIMITS = {
 
 
 @dataclass(frozen=True)
+class PolicySpec:
+    name: str
+    mode: str  # "stand" or "locomotion": command semantics for this policy.
+    path: Path
+
+
+@dataclass(frozen=True)
 class RobotProfile:
     dof: int
     root_height: float
@@ -175,8 +197,12 @@ class GamepadCommandSource:
         self._waiting_reported = False
         self._previous_y = False
         self._previous_x = False
+        self._previous_a = False
         self._previous_stop = False
-        self.left_arm_toggle_requested = False
+        self._previous_damping = False
+        self.x_toggle_requested = False
+        self.a_toggle_requested = False
+        self.damping_stop_requested = False
         self.enabled = True
         self.connected = False
 
@@ -213,8 +239,12 @@ class GamepadCommandSource:
         self._waiting_reported = False
         self._previous_y = False
         self._previous_x = False
+        self._previous_a = False
         self._previous_stop = False
-        self.left_arm_toggle_requested = False
+        self._previous_damping = False
+        self.x_toggle_requested = False
+        self.a_toggle_requested = False
+        self.damping_stop_requested = False
         state = "enabled" if self.enabled else "disabled; press Y to enable"
         print(f"Gamepad connected: {self._controller.name} ({state}).")
 
@@ -229,8 +259,12 @@ class GamepadCommandSource:
         self.enabled = False
         self._previous_y = False
         self._previous_x = False
+        self._previous_a = False
         self._previous_stop = False
-        self.left_arm_toggle_requested = False
+        self._previous_damping = False
+        self.x_toggle_requested = False
+        self.a_toggle_requested = False
+        self.damping_stop_requested = False
         self._next_connect_attempt = 0.0
         if not self._waiting_reported:
             print("Gamepad disconnected: command cleared; reconnect and press Y to enable.")
@@ -245,7 +279,9 @@ class GamepadCommandSource:
         return float(np.copysign((magnitude - self.deadzone) / (1.0 - self.deadzone), value))
 
     def poll(self, mode: str) -> np.ndarray:
-        self.left_arm_toggle_requested = False
+        self.x_toggle_requested = False
+        self.a_toggle_requested = False
+        self.damping_stop_requested = False
         zero_command = np.zeros(3, dtype=np.float64)
         if self._controller is None:
             self._try_connect()
@@ -260,10 +296,20 @@ class GamepadCommandSource:
 
             y_pressed = bool(self._controller.get_button(self._pygame.CONTROLLER_BUTTON_Y))
             x_pressed = bool(self._controller.get_button(self._pygame.CONTROLLER_BUTTON_X))
+            a_pressed = bool(self._controller.get_button(self._pygame.CONTROLLER_BUTTON_A))
             stop_pressed = bool(
                 self._controller.get_button(self._pygame.CONTROLLER_BUTTON_LEFTSHOULDER)
                 and self._controller.get_button(self._pygame.CONTROLLER_BUTTON_RIGHTSHOULDER)
             )
+            damping_pressed = bool(
+                self._controller.get_axis(self._pygame.CONTROLLER_AXIS_TRIGGERLEFT)
+                > 0.5 * self.AXIS_MAX
+                and self._controller.get_button(self._pygame.CONTROLLER_BUTTON_B)
+            )
+            if damping_pressed and not self._previous_damping:
+                self.damping_stop_requested = True
+                self.enabled = False
+                print("Gamepad LT+B: damping stop requested; gamepad control disabled.")
             if stop_pressed and not self._previous_stop:
                 self.enabled = False
                 print("Gamepad LB+RB: command cleared and gamepad control disabled.")
@@ -271,10 +317,14 @@ class GamepadCommandSource:
                 self.enabled = not self.enabled
                 print(f"Gamepad control: {'ON' if self.enabled else 'OFF (command cleared)'}.")
             if x_pressed and not self._previous_x and not stop_pressed:
-                self.left_arm_toggle_requested = True
+                self.x_toggle_requested = True
+            if a_pressed and not self._previous_a and not damping_pressed:
+                self.a_toggle_requested = True
             self._previous_y = y_pressed
             self._previous_x = x_pressed
+            self._previous_a = a_pressed
             self._previous_stop = stop_pressed
+            self._previous_damping = damping_pressed
 
             if not self.enabled:
                 return zero_command
@@ -430,6 +480,7 @@ class LeftArmTrajectory:
         period: float = 6.0,
         blend_time: float = 2.0,
         ref_vel_scale: float = 0.25,
+        start_phase: float = 1.5,
     ):
         if profile.dof != 27:
             raise ValueError("Left-arm trajectory policies require the 27-DOF robot.")
@@ -461,6 +512,10 @@ class LeftArmTrajectory:
         self.period = period
         self.blend_time = blend_time
         self.ref_vel_scale = ref_vel_scale
+        # Blending sweeps the arm along a straight joint-space path that is not
+        # collision-aware; starting near phase 0 (or 4.5s+) drives the wrist
+        # through the hip.  Offsetting the start phase keeps the blend clear.
+        self.start_phase = start_phase
         self.default_enabled = enabled
         self.enabled = enabled
         self.elapsed = 0.0
@@ -481,7 +536,7 @@ class LeftArmTrajectory:
         if not self.enabled:
             return np.zeros(LEFT_ARM_COMMAND_DIM, dtype=np.float32)
 
-        phase = self.elapsed % self.period
+        phase = (self.start_phase + self.elapsed) % self.period
         angles = phase * self.omega
         cosines = np.cos(angles)
         sines = np.sin(angles)
@@ -613,14 +668,17 @@ class HumanoidUltraSim2Sim:
     CONTROL_DECIMATION = 4
     ACTION_SCALE = 0.25
     HISTORY_LENGTH = 10
+    # Uniform joint damping used by the LT+B kd-only stop.
+    DAMPING_STOP_KD = 5.0
 
     def __init__(
         self,
         dof: int,
-        policy_path: Path,
+        policy_specs: list[PolicySpec],
         command: np.ndarray,
         left_arm_traj_path: Path | None,
         left_arm_enabled: bool,
+        left_arm_start_phase: float,
         elastic_band_enabled: bool,
         band_lift: float,
         band_anchor_height: float,
@@ -638,8 +696,11 @@ class HumanoidUltraSim2Sim:
         )
         if not model_path.is_file():
             raise FileNotFoundError(f"MuJoCo scene not found: {model_path}")
-        if not policy_path.is_file():
-            raise FileNotFoundError(f"Exported TorchScript policy not found: {policy_path}")
+        if not policy_specs:
+            raise ValueError("At least one policy must be provided.")
+        for spec in policy_specs:
+            if not spec.path.is_file():
+                raise FileNotFoundError(f"Exported TorchScript policy not found: {spec.path}")
 
         self.model_path = model_path
         self.model = mujoco.MjModel.from_xml_path(str(model_path))
@@ -674,45 +735,99 @@ class HumanoidUltraSim2Sim:
         )
         for name, limits in zip(self.profile.joint_names, self.profile.position_limits):
             self.model.jnt_range[self.model.joint(name).id] = limits
-        self.policy = torch.jit.load(str(policy_path), map_location="cpu")
-        self.policy.eval()
-        input_dim = policy_input_dim(self.policy)
-        if input_dim % self.HISTORY_LENGTH != 0:
-            raise RuntimeError(
-                f"Policy input size {input_dim} is not divisible by history length "
-                f"{self.HISTORY_LENGTH}."
+        self.policy_entries = []
+        for spec in policy_specs:
+            policy = torch.jit.load(str(spec.path), map_location="cpu")
+            policy.eval()
+            input_dim = policy_input_dim(policy)
+            if input_dim % self.HISTORY_LENGTH != 0:
+                raise RuntimeError(
+                    f"Policy input size {input_dim} is not divisible by history length "
+                    f"{self.HISTORY_LENGTH}."
+                )
+            policy_frame_dim = input_dim // self.HISTORY_LENGTH
+            if policy_frame_dim == self.profile.observation_dim:
+                uses_left_arm = False
+            elif policy_frame_dim == self.profile.observation_dim + LEFT_ARM_COMMAND_DIM:
+                uses_left_arm = True
+            else:
+                raise RuntimeError(
+                    f"Unsupported policy observation size ({spec.name}): "
+                    f"{policy_frame_dim} per frame. Expected "
+                    f"{self.profile.observation_dim} for standard stand/locomotion or "
+                    f"{self.profile.observation_dim + LEFT_ARM_COMMAND_DIM} for stand-leftarm."
+                )
+            with torch.inference_mode():
+                test_output = policy(torch.zeros(1, input_dim, dtype=torch.float32))
+            if not isinstance(test_output, torch.Tensor) or tuple(test_output.shape) != (
+                1,
+                self.profile.dof,
+            ):
+                raise RuntimeError(
+                    f"Policy shape mismatch ({spec.name}): expected [1, {self.profile.dof}], "
+                    f"got {getattr(test_output, 'shape', type(test_output))}"
+                )
+            self.policy_entries.append(
+                {
+                    "name": spec.name,
+                    "mode": spec.mode,
+                    "policy": policy,
+                    "uses_left_arm": uses_left_arm,
+                }
             )
-        frame_observation_dim = input_dim // self.HISTORY_LENGTH
-        if frame_observation_dim == self.profile.observation_dim:
-            self.left_arm_trajectory = None
-        elif frame_observation_dim == self.profile.observation_dim + LEFT_ARM_COMMAND_DIM:
+        self.active_policy_index = 0
+
+        if any(entry["uses_left_arm"] for entry in self.policy_entries):
             trajectory_path = left_arm_traj_path or Path(__file__).with_name(
                 "left_wrist_pitch_traj.csv"
             )
             self.left_arm_trajectory = LeftArmTrajectory(
-                trajectory_path.resolve(), self.profile, left_arm_enabled
+                trajectory_path.resolve(),
+                self.profile,
+                left_arm_enabled,
+                start_phase=left_arm_start_phase,
             )
         else:
-            raise RuntimeError(
-                "Unsupported policy observation size: "
-                f"{frame_observation_dim} per frame ({input_dim} total). Expected "
-                f"{self.profile.observation_dim} for standard stand/locomotion or "
-                f"{self.profile.observation_dim + LEFT_ARM_COMMAND_DIM} for stand-leftarm."
-            )
+            self.left_arm_trajectory = None
         self.command = command.astype(np.float64)
         self.previous_action = np.zeros(self.profile.dof, dtype=np.float64)
         self.target_joint_pos = self.profile.default_joint_pos.copy()
         self.observation_history: deque[np.ndarray] = deque(maxlen=self.HISTORY_LENGTH)
-
-        with torch.inference_mode():
-            test_output = self.policy(torch.zeros(1, input_dim, dtype=torch.float32))
-        if not isinstance(test_output, torch.Tensor) or tuple(test_output.shape) != (1, self.profile.dof):
-            raise RuntimeError(
-                f"Policy shape mismatch: expected [1, {self.profile.dof}], got "
-                f"{getattr(test_output, 'shape', type(test_output))}"
-            )
+        self.damping_stopped = False
 
         self.reset()
+
+    @property
+    def active_entry(self) -> dict:
+        return self.policy_entries[self.active_policy_index]
+
+    @property
+    def active_name(self) -> str:
+        return self.active_entry["name"]
+
+    @property
+    def active_mode(self) -> str:
+        return self.active_entry["mode"]
+
+    def switch_policy(self) -> str:
+        """Cycle to the next policy, restarting its observation history."""
+        self.active_policy_index = (self.active_policy_index + 1) % len(self.policy_entries)
+        self.observation_history.clear()
+        self.previous_action.fill(0.0)
+        self.command[:] = 0.0
+        if self.left_arm_trajectory is not None:
+            self.left_arm_trajectory.reset()
+        return self.active_name
+
+    def engage_damping_stop(self) -> None:
+        if self.damping_stopped:
+            return
+        self.damping_stopped = True
+        self.command[:] = 0.0
+        print(
+            f"Damping stop: inference halted, kd-only damping "
+            f"(kd={self.DAMPING_STOP_KD:.1f}). Press R to reset."
+        )
 
     def reset(self) -> None:
         mujoco.mj_resetData(self.model, self.data)
@@ -730,6 +845,7 @@ class HumanoidUltraSim2Sim:
         self.previous_action.fill(0.0)
         self.target_joint_pos[:] = self.profile.default_joint_pos
         self.observation_history.clear()
+        self.damping_stopped = False
         if self.left_arm_trajectory is not None:
             self.left_arm_trajectory.reset()
         mujoco.mj_forward(self.model, self.data)
@@ -749,7 +865,7 @@ class HumanoidUltraSim2Sim:
             joint_vel,
             self.previous_action,
         ]
-        if self.left_arm_trajectory is not None:
+        if self.active_entry["uses_left_arm"]:
             observation_parts.append(self.left_arm_trajectory.observation())
         observation = np.concatenate(observation_parts)
         return np.clip(observation, -100.0, 100.0).astype(np.float32)
@@ -763,17 +879,26 @@ class HumanoidUltraSim2Sim:
             self.observation_history.append(observation)
         policy_input = np.concatenate(tuple(self.observation_history))
         with torch.inference_mode():
-            action = self.policy(torch.from_numpy(policy_input).unsqueeze(0)).squeeze(0).cpu().numpy()
+            action = (
+                self.active_entry["policy"](torch.from_numpy(policy_input).unsqueeze(0))
+                .squeeze(0)
+                .cpu()
+                .numpy()
+            )
         self.previous_action = np.clip(action, -100.0, 100.0).astype(np.float64)
         self.target_joint_pos = self.profile.default_joint_pos + self.ACTION_SCALE * self.previous_action
 
     def prepare_physics_step(self) -> np.ndarray:
         joint_pos = self.data.qpos[self.qpos_indices]
         joint_vel = self.data.qvel[self.qvel_indices]
-        torque = (
-            self.profile.stiffness * (self.target_joint_pos - joint_pos)
-            - self.profile.damping * joint_vel
-        )
+        if self.damping_stopped:
+            # LT+B stop: kd-only damping, no position tracking or feed-forward.
+            torque = -self.DAMPING_STOP_KD * joint_vel
+        else:
+            torque = (
+                self.profile.stiffness * (self.target_joint_pos - joint_pos)
+                - self.profile.damping * joint_vel
+            )
         applied_torque = np.clip(
             torque, -self.profile.torque_limits, self.profile.torque_limits
         )
@@ -803,22 +928,43 @@ class HumanoidUltraSim2Sim:
             self.left_arm_trajectory.reset()
 
     def control_step(self) -> None:
-        self.update_policy()
+        if not self.damping_stopped:
+            self.update_policy()
         for _ in range(self.CONTROL_DECIMATION):
             self.physics_step()
-        if self.left_arm_trajectory is not None:
+        if self.active_entry["uses_left_arm"]:
             self.left_arm_trajectory.advance(self.SIM_DT * self.CONTROL_DECIMATION)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--policy", type=Path, required=True, help="Exported JIT policy.pt from Isaac Lab.")
-    parser.add_argument("--dof", type=int, choices=(12, 27), required=True)
+    parser.add_argument(
+        "--policy",
+        type=Path,
+        default=None,
+        help="Exported JIT policy.pt from Isaac Lab. Runs single-policy mode "
+        "(required for stand-leftarm policies); omit to load the default "
+        "stand+walk pair with X-button switching.",
+    )
+    parser.add_argument(
+        "--stand-policy",
+        type=Path,
+        default=DEFAULT_STAND_POLICY,
+        help="Stand policy for dual-policy mode (ignored when --policy is set).",
+    )
+    parser.add_argument(
+        "--walk-policy",
+        type=Path,
+        default=DEFAULT_WALK_POLICY,
+        help="Walk policy for dual-policy mode (ignored when --policy is set).",
+    )
+    parser.add_argument("--dof", type=int, choices=(12, 27), default=27)
     parser.add_argument(
         "--mode",
         choices=("locomotion", "stand"),
         default="locomotion",
-        help="Policy command semantics and keyboard bindings.",
+        help="Policy command semantics and keyboard bindings. In dual-policy "
+        "mode this selects the initially active policy.",
     )
     parser.add_argument("--vx", type=float, default=0.0, help="Forward velocity command in m/s.")
     parser.add_argument("--vy", type=float, default=0.0, help="Lateral velocity command in m/s.")
@@ -850,6 +996,14 @@ def parse_args() -> argparse.Namespace:
             "left_wrist_pitch_traj.csv next to this script."
         ),
     )
+    parser.add_argument(
+        "--left-arm-start-phase",
+        type=float,
+        default=1.5,
+        help="Trajectory phase [s] the left-arm blend starts from. Phases in "
+        "0.75-3.75 keep the blend path collision-free; 0 sweeps the wrist "
+        "through the hip.",
+    )
     arm_group = parser.add_mutually_exclusive_group()
     arm_group.add_argument(
         "--left-arm-track",
@@ -863,7 +1017,7 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Start a stand-leftarm policy with its arm command disabled.",
     )
-    parser.set_defaults(left_arm_enabled=True)
+    parser.set_defaults(left_arm_enabled=False)
     parser.add_argument(
         "--stand-seconds",
         type=float,
@@ -925,7 +1079,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.mode == "stand":
+    if args.policy is not None:
+        policy_specs = [PolicySpec(args.mode, args.mode, args.policy.resolve())]
+    else:
+        policy_specs = [
+            PolicySpec("stand", "stand", args.stand_policy.resolve()),
+            PolicySpec("walk", "locomotion", args.walk_policy.resolve()),
+        ]
+        if args.mode == "locomotion":
+            policy_specs.reverse()
+    initial_mode = policy_specs[0].mode
+
+    if initial_mode == "stand":
         command = np.asarray(
             [args.height_command, args.roll_command, args.pitch_command],
             dtype=np.float64,
@@ -938,14 +1103,15 @@ def main() -> None:
         command.fill(0.0)
     elastic_band_enabled = args.elastic_band_enabled
     if elastic_band_enabled is None:
-        elastic_band_enabled = args.mode == "locomotion"
+        elastic_band_enabled = initial_mode == "locomotion"
 
     simulator = HumanoidUltraSim2Sim(
         dof=args.dof,
-        policy_path=args.policy.resolve(),
+        policy_specs=policy_specs,
         command=command,
         left_arm_traj_path=args.left_arm_traj,
         left_arm_enabled=args.left_arm_enabled,
+        left_arm_start_phase=args.left_arm_start_phase,
         elastic_band_enabled=elastic_band_enabled,
         band_lift=args.band_lift,
         band_anchor_height=args.band_anchor_height,
@@ -962,14 +1128,17 @@ def main() -> None:
     if simulator.left_arm_trajectory is not None:
         state = "ON" if simulator.left_arm_trajectory.enabled else "OFF"
         print(f"Left-arm trajectory: {state} (L toggles tracking).")
-    if args.mode == "stand":
+    loaded_names = "/".join(entry["name"] for entry in simulator.policy_entries)
+    if initial_mode == "stand":
         print(
-            f"Loaded {args.dof}-DOF stand policy. Command: "
+            f"Loaded {args.dof}-DOF policies: {loaded_names} (active: "
+            f"{simulator.active_name}). Command: "
             f"height={command[0]:.2f}, roll={command[1]:.2f}, pitch={command[2]:.2f}"
         )
     else:
         print(
-            f"Loaded {args.dof}-DOF locomotion policy. Command: "
+            f"Loaded {args.dof}-DOF policies: {loaded_names} (active: "
+            f"{simulator.active_name}). Command: "
             f"vx={command[0]:.2f}, vy={command[1]:.2f}, yaw={command[2]:.2f}"
         )
 
@@ -1000,7 +1169,7 @@ def main() -> None:
             if simulator.left_arm_trajectory is None
             else "ON" if simulator.left_arm_trajectory.enabled else "OFF"
         )
-        if args.mode == "stand":
+        if simulator.active_mode == "stand":
             command_status = (
                 f"height={simulator.command[0]:.2f}, "
                 f"roll={simulator.command[1]:.2f}, pitch={simulator.command[2]:.2f}"
@@ -1016,17 +1185,26 @@ def main() -> None:
             gamepad_status = "DISCONNECTED"
         else:
             gamepad_status = "ON" if gamepad.enabled else "DISABLED"
+        damping_status = " [DAMPING STOP]" if simulator.damping_stopped else ""
         print(
-            f"command {command_status} | "
+            f"policy={simulator.active_name}{damping_status} | command {command_status} | "
             f"band={band_status}, length={simulator.elastic_band.length:.2f}m, "
             f"left_arm={arm_status}, gamepad={gamepad_status}"
         )
 
     def toggle_left_arm() -> None:
-        if simulator.left_arm_trajectory is None:
-            print("This policy has no left-arm trajectory observation.")
+        if simulator.left_arm_trajectory is None or not simulator.active_entry["uses_left_arm"]:
+            print("The active policy has no left-arm trajectory observation.")
         else:
             simulator.left_arm_trajectory.toggle()
+
+    def switch_policy() -> None:
+        if len(simulator.policy_entries) < 2:
+            print(f"Policy switch ignored: only the {simulator.active_name} policy is loaded.")
+        elif simulator.damping_stopped:
+            print("Cannot switch policy during damping stop; press R to reset.")
+        else:
+            print(f"Active policy switched to: {simulator.switch_policy()}")
 
     def key_callback(keycode: int) -> None:
         handled = True
@@ -1035,20 +1213,24 @@ def main() -> None:
             simulator.stand(args.stand_seconds)
         elif keycode in (ord("X"), ord("x"), 32):
             simulator.command[:] = 0.0
+        elif keycode in (ord("P"), ord("p")):
+            switch_policy()
+        elif keycode in (ord("0"),):
+            simulator.engage_damping_stop()
         elif keycode in (ord("W"), ord("w"), glfw_key_up):
             simulator.command[0] = min(1.0, simulator.command[0] + 0.1)
         elif keycode in (ord("S"), ord("s"), glfw_key_down):
-            lower_bound = -1.0 if args.mode == "stand" else -0.6
+            lower_bound = -1.0 if simulator.active_mode == "stand" else -0.6
             simulator.command[0] = max(lower_bound, simulator.command[0] - 0.1)
         elif keycode in (ord("A"), ord("a")):
             simulator.command[1] = min(0.5, simulator.command[1] + 0.1)
         elif keycode in (ord("D"), ord("d")):
             simulator.command[1] = max(-0.5, simulator.command[1] - 0.1)
         elif keycode in (ord("Q"), ord("q"), glfw_key_left):
-            upper_bound = 0.5 if args.mode == "stand" else 1.57
+            upper_bound = 0.5 if simulator.active_mode == "stand" else 1.57
             simulator.command[2] = min(upper_bound, simulator.command[2] + 0.1)
         elif keycode in (ord("E"), ord("e"), glfw_key_right):
-            lower_bound = -0.5 if args.mode == "stand" else -1.57
+            lower_bound = -0.5 if simulator.active_mode == "stand" else -1.57
             simulator.command[2] = max(lower_bound, simulator.command[2] - 0.1)
         elif keycode in (ord("7"),):
             simulator.elastic_band.adjust_length(-0.1)
@@ -1064,21 +1246,26 @@ def main() -> None:
             print_status()
 
     print("Click the MuJoCo window first so it can receive keyboard input.")
-    if args.mode == "stand":
+    if initial_mode == "stand":
         print("Stand: W crouch, S raise, A/D roll, Q/E pitch.")
     else:
         print("Move: W/S or Up/Down, A/D lateral, Q/E or Left/Right yaw.")
     print("Band: 7 shorter/raise, 8 longer/lower, 9/B release or attach.")
     if simulator.left_arm_trajectory is not None:
         print("Left arm: L toggles trajectory tracking or returns to the default pose.")
-    print("Other: X/Space stop, R reset and restore the default band state.")
+    if len(simulator.policy_entries) > 1:
+        print("Policy: P switches stand/walk.")
+    print("Other: X/Space stop, 0 damping stop, R reset and restore the default band state.")
     if gamepad is not None:
-        if args.mode == "stand":
+        if initial_mode == "stand":
             print("Gamepad: left Y=height, left X=roll, right X=pitch.")
         else:
             print("Gamepad: left Y=vx, left X=vy, right X=yaw rate.")
-        print("Gamepad buttons: Y toggles control; X toggles the left-arm trajectory.")
-        print("Gamepad safety: LB+RB clears the command and disables control.")
+        print(
+            "Gamepad buttons: Y toggles control; X switches the stand/walk policy; "
+            "A toggles the left-arm trajectory."
+        )
+        print("Gamepad safety: LT+B damping stop; LB+RB clears the command and disables control.")
     print_status()
     try:
         with mujoco.viewer.launch_passive(
@@ -1087,8 +1274,16 @@ def main() -> None:
             while viewer.is_running():
                 step_start = time.perf_counter()
                 if gamepad is not None:
-                    simulator.command[:] = gamepad.poll(args.mode)
-                    if gamepad.left_arm_toggle_requested:
+                    gamepad_command = gamepad.poll(simulator.active_mode)
+                    if not simulator.damping_stopped:
+                        simulator.command[:] = gamepad_command
+                    if gamepad.damping_stop_requested:
+                        simulator.engage_damping_stop()
+                        print_status()
+                    if gamepad.x_toggle_requested:
+                        switch_policy()
+                        print_status()
+                    if gamepad.a_toggle_requested:
                         toggle_left_arm()
                         print_status()
                 simulator.control_step()
