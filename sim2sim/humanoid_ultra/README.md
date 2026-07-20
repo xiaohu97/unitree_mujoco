@@ -48,6 +48,40 @@ python sim2sim/humanoid_ultra/sim2sim.py \
   --vx 0.3
 ```
 
+### Walk → Mimic → Walk 一次性动作
+
+Mimic 策略需要同时传入导出的 TorchScript 和训练使用的动作 `npz`。下面的模式
+默认先运行 walk；在 MuJoCo 窗口中按 `M`（手柄按 `A`）后，从机器人当前状态
+平滑切换到 Mimic 并从参考动作首帧开始播放。参考动作结束后，程序自动平滑切回
+walk，不会在策略交接时直接重置或跳变关节目标位置。
+
+运行 `USTC-Humanoid-Ultra-27dof-Mimic-RightStand` 一次性动作：
+
+```bash
+cd /home/zxh/ustc_humanoid/unitree_mujoco
+conda activate gmr
+
+python sim2sim/humanoid_ultra/sim2sim.py \
+  --dof 27 \
+  --mimic-policy /home/zxh/unitree_rl_lab/logs/rsl_rl/ustc_humanoid_ultra_27dof_mimic_rightstand/2026-07-20_18-49-29/exported/policy.pt \
+  --motion-file /home/zxh/unitree_rl_lab/source/unitree_rl_lab/unitree_rl_lab/tasks/mimic/robots/humanoid_ultra_27dof/ustc1_rightstand/ustc1_rightstand.npz \
+  --no-elastic-band
+```
+
+默认使用脚本顶部配置的 walk/stand 策略，`P` 仍负责 walk/stand 切换。只有当前
+策略为 walk 时才允许触发 Mimic；Mimic 播放期间按 `P` 可以提前中止并平滑返回
+walk。策略交接使用 0.5 秒五次平滑曲线混合目标关节位置。
+触发时还会把动作首帧的躯干参考朝向对齐到机器人当前世界朝向，避免 walk 的
+航向与 NPZ 录制航向不同而产生瞬时大角度纠偏。接管混合期间参考保持在首帧，
+混合完成后才开始按 50 Hz 推进，因而不会跳过动作开头。
+
+参考动作按 50 Hz（与 `dt=0.005`、`decimation=4` 一致）逐帧播放。从指定参考帧
+开始可添加 `--mimic-start-frame FRAME`。Mimic 使用单帧 144 维观测，不使用
+普通站立/行走策略的 10 帧历史输入。
+
+仍可使用 `--mode mimic --policy ... --motion-file ...` 单独启动 Mimic，用于排查
+策略本身；这种单策略模式没有 walk 策略可返回，因此播放结束后保持最后一帧。
+
 ### 部署 Stand 策略
 
 `USTC-Humanoid-Ultra-27dof-Stand` 的最终策略已经导出到：
@@ -123,6 +157,8 @@ W/S 或 上/下方向键       增加/减小前进速度
 A/D                    增加/减小横向速度
 Q/E 或 左/右方向键       增加/减小转向角速度
 X/空格                  所有速度指令清零
+P                      在 walk/stand 间切换；Mimic 中按下会返回 walk
+M                      从 walk 触发一次 Mimic 动作
 7/8                    缩短/加长弹力带
 9 或 B                  释放/重新连接弹力带
 R                      重置机器人并恢复默认弹力带状态

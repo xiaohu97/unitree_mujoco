@@ -4,6 +4,10 @@
 Without --policy this loads the default stand and walk policies together:
 gamepad X (or keyboard P) switches between them, and gamepad LT+B (or
 keyboard 0) stops inference and latches kd-only damping until reset (R).
+
+Use ``--mimic-policy`` with the training motion ``.npz`` to add a one-shot
+walk-to-Mimic-to-walk action, or ``--mode mimic --policy`` for direct testing.
+The reference is advanced once per 50 Hz policy step.
 """
 
 from __future__ import annotations
@@ -74,6 +78,40 @@ ISAAC_27DOF_JOINTS = (
     "right_wrist_pitch_joint",
 )
 
+# Isaac/PhysX stores articulation bodies breadth-first.  The motion NPZ files
+# are written directly from ``robot.data.body_*_w`` in this order.
+ISAAC_27DOF_BODIES = (
+    "base_link",
+    "left_hip_roll_link",
+    "right_hip_roll_link",
+    "trunk_link",
+    "left_hip_yaw_link",
+    "right_hip_yaw_link",
+    "left_shoulder_pitch_link",
+    "right_shoulder_pitch_link",
+    "left_hip_pitch_link",
+    "right_hip_pitch_link",
+    "left_shoulder_roll_link",
+    "right_shoulder_roll_link",
+    "left_knee_link",
+    "right_knee_link",
+    "left_shoulder_yaw_link",
+    "right_shoulder_yaw_link",
+    "left_ankle_pitch_link",
+    "right_ankle_pitch_link",
+    "left_elbow_link",
+    "right_elbow_link",
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+    "left_wrist_yaw_link",
+    "right_wrist_yaw_link",
+    "left_wrist_roll_link",
+    "right_wrist_roll_link",
+    "left_wrist_pitch_link",
+    "right_wrist_pitch_link",
+)
+MIMIC_ANCHOR_BODY_NAME = "trunk_link"
+
 LEFT_ARM_JOINTS = (
     "left_shoulder_pitch_joint",
     "left_shoulder_roll_joint",
@@ -119,29 +157,29 @@ URDF_27DOF_JOINTS = URDF_12DOF_JOINTS + (
 )
 
 TRAINING_POSITION_LIMITS = {
-    "left_hip_roll_joint": (-0.25, 1.5708),
-    "right_hip_roll_joint": (-1.5708, 0.25),
-    "left_hip_yaw_joint": (-1.5708, 1.5708),
-    "right_hip_yaw_joint": (-1.5708, 1.5708),
-    "left_hip_pitch_joint": (-1.5708, 1.5708),
-    "right_hip_pitch_joint": (-1.5708, 1.5708),
-    "left_knee_joint": (0.0, 2.356),
-    "right_knee_joint": (0.0, 2.356),
+    "left_hip_roll_joint": (-0.25, 1.57),
+    "right_hip_roll_joint": (-1.57, 0.25),
+    "left_hip_yaw_joint": (-1.57, 1.57),
+    "right_hip_yaw_joint": (-1.57, 1.57),
+    "left_hip_pitch_joint": (-1.57, 1.57),
+    "right_hip_pitch_joint": (-1.57, 1.57),
+    "left_knee_joint": (0.0, 2.36),
+    "right_knee_joint": (0.0, 2.36),
     "left_ankle_pitch_joint": (-0.7, 0.95),
     "right_ankle_pitch_joint": (-0.7, 0.95),
-    "left_ankle_roll_joint": (-0.5236, 0.5236),
-    "right_ankle_roll_joint": (-0.5236, 0.5236),
-    "waist_yaw_joint": (-2.618, 2.618),
+    "left_ankle_roll_joint": (-0.45, 0.45),
+    "right_ankle_roll_joint": (-0.45, 0.45),
+    "waist_yaw_joint": (-2.62, 2.62),
     "left_shoulder_pitch_joint": (-2.4, 1.2),
     "right_shoulder_pitch_joint": (-1.2, 2.4),
-    "left_shoulder_roll_joint": (-0.3, 2.7),
-    "right_shoulder_roll_joint": (-2.7, 0.3),
-    "left_shoulder_yaw_joint": (-2.5, 2.5),
-    "right_shoulder_yaw_joint": (-2.5, 2.5),
+    "left_shoulder_roll_joint": (-0.6, 2.7),
+    "right_shoulder_roll_joint": (-2.7, 0.6),
+    "left_shoulder_yaw_joint": (-3.7175512, 1.623156),
+    "right_shoulder_yaw_joint": (-1.623156, 3.7175512),
     "left_elbow_joint": (-2.17, 0.0),
     "right_elbow_joint": (0.0, 2.17),
-    "left_wrist_yaw_joint": (-2.5, 2.5),
-    "right_wrist_yaw_joint": (-2.5, 2.5),
+    "left_wrist_yaw_joint": (-1.1519173, 4.043510),
+    "right_wrist_yaw_joint": (-4.043510, 1.1519173),
     "left_wrist_roll_joint": (-1.11, 1.11),
     "right_wrist_roll_joint": (-1.11, 1.11),
     "left_wrist_pitch_joint": (-1.05, 1.05),
@@ -152,7 +190,7 @@ TRAINING_POSITION_LIMITS = {
 @dataclass(frozen=True)
 class PolicySpec:
     name: str
-    mode: str  # "stand" or "locomotion": command semantics for this policy.
+    mode: str  # "stand", "locomotion", or "mimic" observation semantics.
     path: Path
 
 
@@ -171,6 +209,12 @@ class RobotProfile:
     @property
     def observation_dim(self) -> int:
         return 9 + 3 * self.dof
+
+    @property
+    def mimic_observation_dim(self) -> int:
+        # 2*dof reference command + 6-D anchor orientation + 3-D base angular
+        # velocity + joint position/velocity + previous action.
+        return 9 + 5 * self.dof
 
 
 class GamepadCommandSource:
@@ -458,6 +502,35 @@ def quaternion_to_rotation_matrix(quaternion: np.ndarray) -> np.ndarray:
     )
 
 
+def quaternion_conjugate(quaternion: np.ndarray) -> np.ndarray:
+    quaternion = np.asarray(quaternion, dtype=np.float64)
+    norm = float(np.linalg.norm(quaternion))
+    if norm < 1.0e-12:
+        raise ValueError("Cannot conjugate a zero-length quaternion.")
+    result = quaternion / norm
+    result[1:] *= -1.0
+    return result
+
+
+def quaternion_multiply(lhs: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    """Multiply two wxyz quaternions."""
+    w1, x1, y1, z1 = np.asarray(lhs, dtype=np.float64)
+    w2, x2, y2, z2 = np.asarray(rhs, dtype=np.float64)
+    result = np.asarray(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        dtype=np.float64,
+    )
+    norm = float(np.linalg.norm(result))
+    if norm < 1.0e-12:
+        raise ValueError("Quaternion multiplication produced a zero-length quaternion.")
+    return result / norm
+
+
 def policy_input_dim(policy: torch.jit.ScriptModule) -> int:
     """Read the actor input width from the exported TorchScript policy."""
     state_dict = policy.state_dict()
@@ -467,6 +540,118 @@ def policy_input_dim(policy: torch.jit.ScriptModule) -> int:
             "Cannot determine policy input size: actor.0.weight is missing from policy.pt."
         )
     return int(first_layer.shape[1])
+
+
+class MimicMotion:
+    """50 Hz reference stream matching the Isaac Lab MotionCommand policy input."""
+
+    REQUIRED_KEYS = (
+        "fps",
+        "joint_pos",
+        "joint_vel",
+        "body_pos_w",
+        "body_quat_w",
+        "body_lin_vel_w",
+        "body_ang_vel_w",
+    )
+
+    def __init__(self, motion_path: Path, profile: RobotProfile, start_frame: int):
+        if profile.dof != 27:
+            raise ValueError("Mimic motion playback currently requires the 27-DOF robot.")
+        if not motion_path.is_file():
+            raise FileNotFoundError(f"Mimic motion NPZ not found: {motion_path}")
+
+        with np.load(motion_path) as data:
+            missing = [key for key in self.REQUIRED_KEYS if key not in data]
+            if missing:
+                raise ValueError(f"Mimic motion NPZ is missing keys: {missing}")
+            self.fps = float(np.asarray(data["fps"]).reshape(-1)[0])
+            self.joint_pos = np.asarray(data["joint_pos"], dtype=np.float64)
+            self.joint_vel = np.asarray(data["joint_vel"], dtype=np.float64)
+            self.body_pos_w = np.asarray(data["body_pos_w"], dtype=np.float64)
+            self.body_quat_w = np.asarray(data["body_quat_w"], dtype=np.float64)
+            self.body_lin_vel_w = np.asarray(data["body_lin_vel_w"], dtype=np.float64)
+            self.body_ang_vel_w = np.asarray(data["body_ang_vel_w"], dtype=np.float64)
+
+        if not np.isclose(self.fps, 50.0):
+            raise ValueError(
+                f"Mimic motion must be sampled at 50 Hz, but {motion_path} reports {self.fps:g} Hz."
+            )
+        expected_joint_shape = (self.joint_pos.shape[0], profile.dof)
+        if self.joint_pos.ndim != 2 or self.joint_pos.shape[1] != profile.dof:
+            raise ValueError(
+                f"Mimic joint_pos must have shape [frames, {profile.dof}], got {self.joint_pos.shape}."
+            )
+        if self.joint_vel.shape != expected_joint_shape:
+            raise ValueError(
+                f"Mimic joint_vel must have shape {expected_joint_shape}, got {self.joint_vel.shape}."
+            )
+        expected_body_shape = (self.joint_pos.shape[0], len(ISAAC_27DOF_BODIES))
+        for name, array, width in (
+            ("body_pos_w", self.body_pos_w, 3),
+            ("body_quat_w", self.body_quat_w, 4),
+            ("body_lin_vel_w", self.body_lin_vel_w, 3),
+            ("body_ang_vel_w", self.body_ang_vel_w, 3),
+        ):
+            if array.shape != (*expected_body_shape, width):
+                raise ValueError(
+                    f"Mimic {name} must have shape {(*expected_body_shape, width)}, got {array.shape}."
+                )
+        if not 0 <= start_frame < self.joint_pos.shape[0]:
+            raise ValueError(
+                f"--mimic-start-frame must be in [0, {self.joint_pos.shape[0] - 1}]."
+            )
+
+        self.path = motion_path
+        self.anchor_body_index = ISAAC_27DOF_BODIES.index(MIMIC_ANCHOR_BODY_NAME)
+        self.start_frame = start_frame
+        self.frame_index = start_frame
+        self.finished = False
+        self.anchor_alignment = np.asarray((1.0, 0.0, 0.0, 0.0), dtype=np.float64)
+
+    @property
+    def frame_count(self) -> int:
+        return self.joint_pos.shape[0]
+
+    @property
+    def duration(self) -> float:
+        return (self.frame_count - self.start_frame) / self.fps
+
+    @property
+    def command(self) -> np.ndarray:
+        return np.concatenate(
+            (self.joint_pos[self.frame_index], self.joint_vel[self.frame_index])
+        )
+
+    @property
+    def anchor_quaternion(self) -> np.ndarray:
+        return quaternion_multiply(
+            self.anchor_alignment,
+            self.body_quat_w[self.frame_index, self.anchor_body_index],
+        )
+
+    def reset(self) -> None:
+        self.frame_index = self.start_frame
+        self.finished = False
+        self.anchor_alignment[:] = (1.0, 0.0, 0.0, 0.0)
+
+    def align_anchor_to(self, robot_anchor_quaternion: np.ndarray) -> None:
+        """Rotate the reference clip so its first anchor matches the live robot."""
+        reference_anchor = self.body_quat_w[self.start_frame, self.anchor_body_index]
+        self.anchor_alignment = quaternion_multiply(
+            robot_anchor_quaternion,
+            quaternion_conjugate(reference_anchor),
+        )
+
+    def advance(self) -> bool:
+        """Advance one reference frame and report the first end-of-clip event."""
+        if self.frame_index < self.frame_count - 1:
+            self.frame_index += 1
+            return False
+        if self.finished:
+            return False
+        self.finished = True
+        return True
 
 
 class LeftArmTrajectory:
@@ -668,6 +853,7 @@ class HumanoidUltraSim2Sim:
     CONTROL_DECIMATION = 4
     ACTION_SCALE = 0.25
     HISTORY_LENGTH = 10
+    POLICY_BLEND_DURATION = 0.5
     # Uniform joint damping used by the LT+B kd-only stop.
     DAMPING_STOP_KD = 5.0
 
@@ -676,6 +862,8 @@ class HumanoidUltraSim2Sim:
         dof: int,
         policy_specs: list[PolicySpec],
         command: np.ndarray,
+        mimic_motion_path: Path | None,
+        mimic_start_frame: int,
         left_arm_traj_path: Path | None,
         left_arm_enabled: bool,
         left_arm_start_phase: float,
@@ -740,23 +928,38 @@ class HumanoidUltraSim2Sim:
             policy = torch.jit.load(str(spec.path), map_location="cpu")
             policy.eval()
             input_dim = policy_input_dim(policy)
-            if input_dim % self.HISTORY_LENGTH != 0:
-                raise RuntimeError(
-                    f"Policy input size {input_dim} is not divisible by history length "
-                    f"{self.HISTORY_LENGTH}."
-                )
-            policy_frame_dim = input_dim // self.HISTORY_LENGTH
-            if policy_frame_dim == self.profile.observation_dim:
+            uses_mimic = input_dim == self.profile.mimic_observation_dim
+            if uses_mimic:
+                if spec.mode != "mimic":
+                    raise RuntimeError(
+                        f"Policy {spec.name} has the {input_dim}-D Mimic input, so run it with "
+                        "--mode mimic and --motion-file /path/to/motion.npz."
+                    )
                 uses_left_arm = False
-            elif policy_frame_dim == self.profile.observation_dim + LEFT_ARM_COMMAND_DIM:
-                uses_left_arm = True
             else:
-                raise RuntimeError(
-                    f"Unsupported policy observation size ({spec.name}): "
-                    f"{policy_frame_dim} per frame. Expected "
-                    f"{self.profile.observation_dim} for standard stand/locomotion or "
-                    f"{self.profile.observation_dim + LEFT_ARM_COMMAND_DIM} for stand-leftarm."
-                )
+                if spec.mode == "mimic":
+                    raise RuntimeError(
+                        f"Policy {spec.name} has input size {input_dim}, but a 27-DOF Mimic "
+                        f"policy must have {self.profile.mimic_observation_dim} inputs."
+                    )
+                if input_dim % self.HISTORY_LENGTH != 0:
+                    raise RuntimeError(
+                        f"Policy input size {input_dim} is not divisible by history length "
+                        f"{self.HISTORY_LENGTH}."
+                    )
+                policy_frame_dim = input_dim // self.HISTORY_LENGTH
+                if policy_frame_dim == self.profile.observation_dim:
+                    uses_left_arm = False
+                elif policy_frame_dim == self.profile.observation_dim + LEFT_ARM_COMMAND_DIM:
+                    uses_left_arm = True
+                else:
+                    raise RuntimeError(
+                        f"Unsupported policy observation size ({spec.name}): "
+                        f"{policy_frame_dim} per frame. Expected "
+                        f"{self.profile.observation_dim} for standard stand/locomotion, "
+                        f"{self.profile.observation_dim + LEFT_ARM_COMMAND_DIM} for stand-leftarm, "
+                        f"or {self.profile.mimic_observation_dim} total for Mimic."
+                    )
             with torch.inference_mode():
                 test_output = policy(torch.zeros(1, input_dim, dtype=torch.float32))
             if not isinstance(test_output, torch.Tensor) or tuple(test_output.shape) != (
@@ -773,9 +976,19 @@ class HumanoidUltraSim2Sim:
                     "mode": spec.mode,
                     "policy": policy,
                     "uses_left_arm": uses_left_arm,
+                    "uses_mimic": uses_mimic,
                 }
             )
         self.active_policy_index = 0
+
+        if any(entry["uses_mimic"] for entry in self.policy_entries):
+            if mimic_motion_path is None:
+                raise ValueError("Mimic mode requires --motion-file /path/to/motion.npz.")
+            self.mimic_motion = MimicMotion(
+                mimic_motion_path.resolve(), self.profile, mimic_start_frame
+            )
+        else:
+            self.mimic_motion = None
 
         if any(entry["uses_left_arm"] for entry in self.policy_entries):
             trajectory_path = left_arm_traj_path or Path(__file__).with_name(
@@ -793,6 +1006,8 @@ class HumanoidUltraSim2Sim:
         self.previous_action = np.zeros(self.profile.dof, dtype=np.float64)
         self.target_joint_pos = self.profile.default_joint_pos.copy()
         self.observation_history: deque[np.ndarray] = deque(maxlen=self.HISTORY_LENGTH)
+        self.policy_transition_start: np.ndarray | None = None
+        self.policy_transition_elapsed = 0.0
         self.damping_stopped = False
 
         self.reset()
@@ -809,23 +1024,63 @@ class HumanoidUltraSim2Sim:
     def active_mode(self) -> str:
         return self.active_entry["mode"]
 
-    def switch_policy(self) -> str:
-        """Cycle to the next policy, restarting its observation history."""
-        self.active_policy_index = (self.active_policy_index + 1) % len(self.policy_entries)
+    @property
+    def has_mimic_policy(self) -> bool:
+        return any(entry["uses_mimic"] for entry in self.policy_entries)
+
+    def _policy_index(self, mode: str) -> int | None:
+        return next(
+            (index for index, entry in enumerate(self.policy_entries) if entry["mode"] == mode),
+            None,
+        )
+
+    def _activate_policy(self, policy_index: int) -> str:
+        """Change policy without discontinuously changing the commanded joints."""
+        if policy_index == self.active_policy_index:
+            return self.active_name
+
+        # Keep the currently commanded target as the first point of a smooth
+        # blend.  The last-action observation must describe that applied target.
+        self.policy_transition_start = self.target_joint_pos.copy()
+        self.policy_transition_elapsed = 0.0
+        self.active_policy_index = policy_index
         self.observation_history.clear()
-        # Reverse-solve the action that holds the current posture so the new
-        # policy's observation is self-consistent and its first target does not
-        # jump away from the measured joint positions.
-        joint_pos = self.data.qpos[self.qpos_indices]
         self.previous_action = np.clip(
-            (joint_pos - self.profile.default_joint_pos) / self.ACTION_SCALE,
+            (self.target_joint_pos - self.profile.default_joint_pos) / self.ACTION_SCALE,
             -100.0,
             100.0,
         ).astype(np.float64)
         self.command[:] = 0.0
         if self.left_arm_trajectory is not None:
             self.left_arm_trajectory.reset()
+        if self.active_entry["uses_mimic"]:
+            self.mimic_motion.reset()
+            robot_anchor_quat = self.data.xquat[self.model.body(MIMIC_ANCHOR_BODY_NAME).id]
+            self.mimic_motion.align_anchor_to(robot_anchor_quat)
         return self.active_name
+
+    def switch_policy(self) -> str:
+        """Toggle stand/walk; aborting an active Mimic returns to walk."""
+        target_mode = "locomotion" if self.active_mode in ("stand", "mimic") else "stand"
+        target_index = self._policy_index(target_mode)
+        if target_index is None:
+            raise RuntimeError(f"No {target_mode} policy is loaded.")
+        return self._activate_policy(target_index)
+
+    def start_mimic(self) -> str:
+        """Start the one-shot Mimic clip from walk mode."""
+        if self.active_mode != "locomotion":
+            raise RuntimeError("Mimic can only start while the walk policy is active.")
+        mimic_index = self._policy_index("mimic")
+        if mimic_index is None:
+            raise RuntimeError("No Mimic policy is loaded.")
+        return self._activate_policy(mimic_index)
+
+    def return_to_walk(self) -> str | None:
+        walk_index = self._policy_index("locomotion")
+        if walk_index is None:
+            return None
+        return self._activate_policy(walk_index)
 
     def engage_damping_stop(self) -> None:
         if self.damping_stopped:
@@ -840,20 +1095,34 @@ class HumanoidUltraSim2Sim:
     def reset(self) -> None:
         mujoco.mj_resetData(self.model, self.data)
         self.elastic_band.set_enabled(self.elastic_band_default_enabled)
-        root_height = (
-            self.elastic_band.suspension_height
-            if self.elastic_band.enabled
-            else self.profile.root_height
-        )
-        self.data.qpos[:3] = (0.0, 0.0, root_height)
-        self.data.qpos[3:7] = (1.0, 0.0, 0.0, 0.0)
-        self.data.qpos[self.qpos_indices] = self.profile.default_joint_pos
         self.data.qvel[:] = 0.0
         self.data.ctrl[:] = 0.0
         self.previous_action.fill(0.0)
-        self.target_joint_pos[:] = self.profile.default_joint_pos
         self.observation_history.clear()
+        self.policy_transition_start = None
+        self.policy_transition_elapsed = 0.0
         self.damping_stopped = False
+        if self.mimic_motion is not None:
+            self.mimic_motion.reset()
+        if self.active_entry["uses_mimic"]:
+            frame = self.mimic_motion.frame_index
+            self.data.qpos[:3] = self.mimic_motion.body_pos_w[frame, 0]
+            self.data.qpos[3:7] = self.mimic_motion.body_quat_w[frame, 0]
+            self.data.qpos[self.qpos_indices] = self.mimic_motion.joint_pos[frame]
+            self.data.qvel[:3] = self.mimic_motion.body_lin_vel_w[frame, 0]
+            self.data.qvel[3:6] = self.mimic_motion.body_ang_vel_w[frame, 0]
+            self.data.qvel[self.qvel_indices] = self.mimic_motion.joint_vel[frame]
+            self.target_joint_pos[:] = self.mimic_motion.joint_pos[frame]
+        else:
+            root_height = (
+                self.elastic_band.suspension_height
+                if self.elastic_band.enabled
+                else self.profile.root_height
+            )
+            self.data.qpos[:3] = (0.0, 0.0, root_height)
+            self.data.qpos[3:7] = (1.0, 0.0, 0.0, 0.0)
+            self.data.qpos[self.qpos_indices] = self.profile.default_joint_pos
+            self.target_joint_pos[:] = self.profile.default_joint_pos
         if self.left_arm_trajectory is not None:
             self.left_arm_trajectory.reset()
         mujoco.mj_forward(self.model, self.data)
@@ -863,6 +1132,27 @@ class HumanoidUltraSim2Sim:
         joint_pos = self.data.qpos[self.qpos_indices]
         joint_vel = self.data.qvel[self.qvel_indices]
         body_angular_velocity = self.data.sensor("BodyGyro").data.copy()
+        if self.active_entry["uses_mimic"]:
+            robot_anchor_quat = self.data.xquat[self.model.body(MIMIC_ANCHOR_BODY_NAME).id]
+            relative_anchor_quat = quaternion_multiply(
+                quaternion_conjugate(robot_anchor_quat),
+                self.mimic_motion.anchor_quaternion,
+            )
+            relative_anchor_rotation_6d = quaternion_to_rotation_matrix(
+                relative_anchor_quat
+            )[:, :2].reshape(-1)
+            observation = np.concatenate(
+                (
+                    self.mimic_motion.command,
+                    relative_anchor_rotation_6d,
+                    body_angular_velocity,
+                    joint_pos - self.profile.default_joint_pos,
+                    joint_vel,
+                    self.previous_action,
+                )
+            )
+            return np.clip(observation, -100.0, 100.0).astype(np.float32)
+
         body_rotation = quaternion_to_rotation_matrix(self.data.qpos[3:7])
         projected_gravity = body_rotation.T @ np.asarray([0.0, 0.0, -1.0])
         observation_parts = [
@@ -880,12 +1170,15 @@ class HumanoidUltraSim2Sim:
 
     def update_policy(self) -> None:
         observation = self._current_observation()
-        if not self.observation_history:
-            for _ in range(self.HISTORY_LENGTH):
-                self.observation_history.append(observation.copy())
+        if self.active_entry["uses_mimic"]:
+            policy_input = observation
         else:
-            self.observation_history.append(observation)
-        policy_input = np.concatenate(tuple(self.observation_history))
+            if not self.observation_history:
+                for _ in range(self.HISTORY_LENGTH):
+                    self.observation_history.append(observation.copy())
+            else:
+                self.observation_history.append(observation)
+            policy_input = np.concatenate(tuple(self.observation_history))
         with torch.inference_mode():
             action = (
                 self.active_entry["policy"](torch.from_numpy(policy_input).unsqueeze(0))
@@ -893,8 +1186,28 @@ class HumanoidUltraSim2Sim:
                 .cpu()
                 .numpy()
             )
-        self.previous_action = np.clip(action, -100.0, 100.0).astype(np.float64)
-        self.target_joint_pos = self.profile.default_joint_pos + self.ACTION_SCALE * self.previous_action
+        requested_action = np.clip(action, -100.0, 100.0).astype(np.float64)
+        requested_target = self.profile.default_joint_pos + self.ACTION_SCALE * requested_action
+        if self.policy_transition_start is not None:
+            self.policy_transition_elapsed = min(
+                self.policy_transition_elapsed + self.SIM_DT * self.CONTROL_DECIMATION,
+                self.POLICY_BLEND_DURATION,
+            )
+            u = self.policy_transition_elapsed / self.POLICY_BLEND_DURATION
+            alpha = 6.0 * u**5 - 15.0 * u**4 + 10.0 * u**3
+            self.target_joint_pos = (
+                (1.0 - alpha) * self.policy_transition_start + alpha * requested_target
+            )
+            self.previous_action = np.clip(
+                (self.target_joint_pos - self.profile.default_joint_pos) / self.ACTION_SCALE,
+                -100.0,
+                100.0,
+            ).astype(np.float64)
+            if self.policy_transition_elapsed >= self.POLICY_BLEND_DURATION:
+                self.policy_transition_start = None
+        else:
+            self.previous_action = requested_action
+            self.target_joint_pos = requested_target
 
     def prepare_physics_step(self) -> np.ndarray:
         joint_pos = self.data.qpos[self.qpos_indices]
@@ -942,6 +1255,24 @@ class HumanoidUltraSim2Sim:
             self.physics_step()
         if self.active_entry["uses_left_arm"]:
             self.left_arm_trajectory.advance(self.SIM_DT * self.CONTROL_DECIMATION)
+        # Hold the first reference frame while blending in from walk.  This
+        # preserves the entire clip instead of consuming its first 0.5 s during
+        # the policy hand-off.
+        mimic_ready_to_advance = (
+            self.active_entry["uses_mimic"] and self.policy_transition_start is None
+        )
+        if mimic_ready_to_advance and self.mimic_motion.advance():
+            walk_name = self.return_to_walk()
+            if walk_name is None:
+                print(
+                    f"Mimic reference finished at frame {self.mimic_motion.frame_index}; "
+                    "holding the final frame. Press R to replay."
+                )
+            else:
+                print(
+                    f"Mimic reference finished at frame {self.mimic_motion.frame_index}; "
+                    f"smoothly returning to {walk_name}."
+                )
 
 
 def parse_args() -> argparse.Namespace:
@@ -951,7 +1282,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Exported JIT policy.pt from Isaac Lab. Runs single-policy mode "
-        "(required for stand-leftarm policies); omit to load the default "
+        "(for stand-leftarm or direct Mimic tests); omit to load the default "
         "stand+walk pair with X-button switching.",
     )
     parser.add_argument(
@@ -966,13 +1297,32 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_WALK_POLICY,
         help="Walk policy for dual-policy mode (ignored when --policy is set).",
     )
+    parser.add_argument(
+        "--mimic-policy",
+        type=Path,
+        default=None,
+        help="Optional one-shot Mimic policy loaded alongside stand+walk. Press M "
+        "from walk to play it; completion returns to walk automatically.",
+    )
     parser.add_argument("--dof", type=int, choices=(12, 27), default=27)
     parser.add_argument(
         "--mode",
-        choices=("locomotion", "stand"),
+        choices=("locomotion", "stand", "mimic"),
         default="locomotion",
         help="Policy command semantics and keyboard bindings. In dual-policy "
         "mode this selects the initially active policy.",
+    )
+    parser.add_argument(
+        "--motion-file",
+        type=Path,
+        default=None,
+        help="Training motion NPZ for a direct or one-shot Mimic policy (must be 50 Hz).",
+    )
+    parser.add_argument(
+        "--mimic-start-frame",
+        type=int,
+        default=0,
+        help="Reference frame used to initialize and start Mimic playback.",
     )
     parser.add_argument("--vx", type=float, default=0.0, help="Forward velocity command in m/s.")
     parser.add_argument("--vy", type=float, default=0.0, help="Lateral velocity command in m/s.")
@@ -1082,6 +1432,19 @@ def parse_args() -> argparse.Namespace:
         parser.error("--gamepad-deadzone must be in [0, 1)")
     if args.gamepad and args.headless:
         parser.error("--gamepad cannot be combined with --headless")
+    if args.policy is not None and args.mimic_policy is not None:
+        parser.error("--policy and --mimic-policy cannot be used together")
+    has_mimic_policy = args.mimic_policy is not None or (
+        args.policy is not None and args.mode == "mimic"
+    )
+    if args.mode == "mimic" and not has_mimic_policy:
+        parser.error("--mode mimic requires --policy or --mimic-policy")
+    if has_mimic_policy and args.motion_file is None:
+        parser.error("Mimic playback requires --motion-file")
+    if not has_mimic_policy and args.motion_file is not None:
+        parser.error("--motion-file requires --mode mimic or --mimic-policy")
+    if args.mimic_start_frame < 0:
+        parser.error("--mimic-start-frame must be non-negative")
     return args
 
 
@@ -1090,15 +1453,23 @@ def main() -> None:
     if args.policy is not None:
         policy_specs = [PolicySpec(args.mode, args.mode, args.policy.resolve())]
     else:
-        policy_specs = [
-            PolicySpec("stand", "stand", args.stand_policy.resolve()),
-            PolicySpec("walk", "locomotion", args.walk_policy.resolve()),
+        policies_by_mode = {
+            "stand": PolicySpec("stand", "stand", args.stand_policy.resolve()),
+            "locomotion": PolicySpec("walk", "locomotion", args.walk_policy.resolve()),
+        }
+        if args.mimic_policy is not None:
+            policies_by_mode["mimic"] = PolicySpec(
+                "mimic", "mimic", args.mimic_policy.resolve()
+            )
+        mode_order = [args.mode] + [
+            mode for mode in ("locomotion", "stand", "mimic") if mode != args.mode
         ]
-        if args.mode == "locomotion":
-            policy_specs.reverse()
+        policy_specs = [policies_by_mode[mode] for mode in mode_order if mode in policies_by_mode]
     initial_mode = policy_specs[0].mode
 
-    if initial_mode == "stand":
+    if initial_mode == "mimic":
+        command = np.zeros(3, dtype=np.float64)
+    elif initial_mode == "stand":
         command = np.asarray(
             [args.height_command, args.roll_command, args.pitch_command],
             dtype=np.float64,
@@ -1117,6 +1488,8 @@ def main() -> None:
         dof=args.dof,
         policy_specs=policy_specs,
         command=command,
+        mimic_motion_path=args.motion_file,
+        mimic_start_frame=args.mimic_start_frame,
         left_arm_traj_path=args.left_arm_traj,
         left_arm_enabled=args.left_arm_enabled,
         left_arm_start_phase=args.left_arm_start_phase,
@@ -1137,7 +1510,13 @@ def main() -> None:
         state = "ON" if simulator.left_arm_trajectory.enabled else "OFF"
         print(f"Left-arm trajectory: {state} (L toggles tracking).")
     loaded_names = "/".join(entry["name"] for entry in simulator.policy_entries)
-    if initial_mode == "stand":
+    if initial_mode == "mimic":
+        print(
+            f"Loaded {args.dof}-DOF Mimic policy: {loaded_names}. Reference: "
+            f"{simulator.mimic_motion.path} ({simulator.mimic_motion.frame_count} frames, "
+            f"{simulator.mimic_motion.fps:g} Hz, start={simulator.mimic_motion.start_frame})."
+        )
+    elif initial_mode == "stand":
         print(
             f"Loaded {args.dof}-DOF policies: {loaded_names} (active: "
             f"{simulator.active_name}). Command: "
@@ -1149,12 +1528,23 @@ def main() -> None:
             f"{simulator.active_name}). Command: "
             f"vx={command[0]:.2f}, vy={command[1]:.2f}, yaw={command[2]:.2f}"
         )
+    if simulator.mimic_motion is not None and initial_mode != "mimic":
+        print(
+            f"One-shot Mimic ready: {simulator.mimic_motion.path} "
+            f"({simulator.mimic_motion.frame_count} frames, "
+            f"{simulator.mimic_motion.fps:g} Hz). Press M from walk to start."
+        )
 
     start_time = time.perf_counter()
     control_dt = simulator.SIM_DT * simulator.CONTROL_DECIMATION
 
     if args.headless:
-        duration = args.duration if args.duration > 0.0 else 10.0
+        if args.duration > 0.0:
+            duration = args.duration
+        elif simulator.mimic_motion is not None:
+            duration = simulator.mimic_motion.duration
+        else:
+            duration = 10.0
         while simulator.data.time < args.stand_seconds + duration:
             simulator.control_step()
         print(
@@ -1177,7 +1567,13 @@ def main() -> None:
             if simulator.left_arm_trajectory is None
             else "ON" if simulator.left_arm_trajectory.enabled else "OFF"
         )
-        if simulator.active_mode == "stand":
+        if simulator.active_mode == "mimic":
+            command_status = (
+                f"reference={simulator.mimic_motion.frame_index + 1}/"
+                f"{simulator.mimic_motion.frame_count} "
+                f"({simulator.mimic_motion.frame_index / simulator.mimic_motion.fps:.2f}s)"
+            )
+        elif simulator.active_mode == "stand":
             command_status = (
                 f"height={simulator.command[0]:.2f}, "
                 f"roll={simulator.command[1]:.2f}, pitch={simulator.command[2]:.2f}"
@@ -1214,6 +1610,16 @@ def main() -> None:
         else:
             print(f"Active policy switched to: {simulator.switch_policy()}")
 
+    def start_mimic() -> None:
+        if not simulator.has_mimic_policy:
+            print("Mimic trigger ignored: no --mimic-policy is loaded.")
+        elif simulator.damping_stopped:
+            print("Cannot start Mimic during damping stop; press R to reset.")
+        elif simulator.active_mode != "locomotion":
+            print("Mimic can only start from walk mode; press P to switch to walk first.")
+        else:
+            print(f"Active policy switched to: {simulator.start_mimic()}")
+
     def key_callback(keycode: int) -> None:
         handled = True
         if keycode in (ord("R"), ord("r")):
@@ -1223,8 +1629,29 @@ def main() -> None:
             simulator.command[:] = 0.0
         elif keycode in (ord("P"), ord("p")):
             switch_policy()
+        elif keycode in (ord("M"), ord("m")):
+            start_mimic()
         elif keycode in (ord("0"),):
             simulator.engage_damping_stop()
+        elif simulator.active_mode == "mimic" and keycode in (
+            ord("W"),
+            ord("w"),
+            ord("S"),
+            ord("s"),
+            ord("A"),
+            ord("a"),
+            ord("D"),
+            ord("d"),
+            ord("Q"),
+            ord("q"),
+            ord("E"),
+            ord("e"),
+            glfw_key_up,
+            glfw_key_down,
+            glfw_key_left,
+            glfw_key_right,
+        ):
+            print("Mimic mode follows the NPZ reference; movement commands are disabled.")
         elif keycode in (ord("W"), ord("w"), glfw_key_up):
             simulator.command[0] = min(1.0, simulator.command[0] + 0.1)
         elif keycode in (ord("S"), ord("s"), glfw_key_down):
@@ -1254,7 +1681,9 @@ def main() -> None:
             print_status()
 
     print("Click the MuJoCo window first so it can receive keyboard input.")
-    if initial_mode == "stand":
+    if initial_mode == "mimic":
+        print("Mimic: the NPZ reference advances at 50 Hz; R restarts from the selected frame.")
+    elif initial_mode == "stand":
         print("Stand: W crouch, S raise, A/D roll, Q/E pitch.")
     else:
         print("Move: W/S or Up/Down, A/D lateral, Q/E or Left/Right yaw.")
@@ -1263,15 +1692,22 @@ def main() -> None:
         print("Left arm: L toggles trajectory tracking or returns to the default pose.")
     if len(simulator.policy_entries) > 1:
         print("Policy: P switches stand/walk.")
+    if simulator.has_mimic_policy:
+        print("Mimic: press M from walk to play once; it returns to walk automatically.")
     print("Other: X/Space stop, 0 damping stop, R reset and restore the default band state.")
     if gamepad is not None:
         if initial_mode == "stand":
             print("Gamepad: left Y=height, left X=roll, right X=pitch.")
         else:
             print("Gamepad: left Y=vx, left X=vy, right X=yaw rate.")
+        gamepad_a_action = (
+            "starts Mimic from walk (otherwise toggles the left-arm trajectory)"
+            if simulator.has_mimic_policy
+            else "toggles the left-arm trajectory"
+        )
         print(
             "Gamepad buttons: Y toggles control; X switches the stand/walk policy; "
-            "A toggles the left-arm trajectory."
+            f"A {gamepad_a_action}."
         )
         print("Gamepad safety: LT+B damping stop; LB+RB clears the command and disables control.")
     print_status()
@@ -1292,7 +1728,12 @@ def main() -> None:
                         switch_policy()
                         print_status()
                     if gamepad.a_toggle_requested:
-                        toggle_left_arm()
+                        if simulator.has_mimic_policy and simulator.active_mode == "locomotion":
+                            start_mimic()
+                        elif simulator.active_mode == "mimic":
+                            print("Mimic is already playing.")
+                        else:
+                            toggle_left_arm()
                         print_status()
                 simulator.control_step()
                 viewer.sync()
