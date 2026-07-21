@@ -51,8 +51,8 @@ python sim2sim/humanoid_ultra/sim2sim.py \
 ### Walk → Mimic → Walk 一次性动作
 
 Mimic 策略需要同时传入导出的 TorchScript 和训练使用的动作 `npz`。下面的模式
-默认先运行 walk；在 MuJoCo 窗口中按 `M`（手柄按 `A`）后，从机器人当前状态
-平滑切换到 Mimic 并从参考动作首帧开始播放。参考动作结束后，程序自动平滑切回
+默认先运行 walk；在 MuJoCo 窗口中按 `M`（手柄按 `LT + 十字键下`）后，从机器人
+当前状态平滑切换到 Mimic 并从参考动作首帧开始播放。参考动作结束后，程序自动平滑切回
 walk，不会在策略交接时直接重置或跳变关节目标位置。
 
 运行 `USTC-Humanoid-Ultra-27dof-Mimic-RightStand` 一次性动作：
@@ -70,7 +70,8 @@ python sim2sim/humanoid_ultra/sim2sim.py \
 
 默认使用脚本顶部配置的 walk/stand 策略，`P` 仍负责 walk/stand 切换。只有当前
 策略为 walk 时才允许触发 Mimic；Mimic 播放期间按 `P` 可以提前中止并平滑返回
-walk。策略交接使用 0.5 秒五次平滑曲线混合目标关节位置。
+walk。手柄组合键按下沿只触发一次，持续按住不会重复播放；手柄 `A` 只用于
+stand-leftarm 的左臂轨迹开关。策略交接使用 0.5 秒五次平滑曲线混合目标关节位置。
 触发时还会把动作首帧的躯干参考朝向对齐到机器人当前世界朝向，避免 walk 的
 航向与 NPZ 录制航向不同而产生瞬时大角度纠偏。接管混合期间参考保持在首帧，
 混合完成后才开始按 50 Hz 推进，因而不会跳过动作开头。
@@ -81,6 +82,13 @@ walk。策略交接使用 0.5 秒五次平滑曲线混合目标关节位置。
 
 仍可使用 `--mode mimic --policy ... --motion-file ...` 单独启动 Mimic，用于排查
 策略本身；这种单策略模式没有 walk 策略可返回，因此播放结束后保持最后一帧。
+
+新训练的 Mimic-Pick 已封装在 `../picksim2sim/`，其中使用仓库内相对路径保存
+策略和 `ustc1_pick.npz`；直接运行 `python sim2sim/picksim2sim/picksim2sim.py`
+即可进入 `walk → pick_prepare → pick_play → pick_recover → walk` 测试。
+Pick 首尾姿态与 walk 相差较大，因此该封装额外启用了固定关节过渡、交接门槛、
+目标限速和仅用于 MuJoCo 的临时基座稳定器；详细边界及可调参数见
+`../picksim2sim/README.md`。
 
 ### 部署 Stand 策略
 
