@@ -48,47 +48,57 @@ python sim2sim/humanoid_ultra/sim2sim.py \
   --vx 0.3
 ```
 
-### Walk → Mimic → Walk 一次性动作
+### 默认多策略状态机
 
-Mimic 策略需要同时传入导出的 TorchScript 和训练使用的动作 `npz`。下面的模式
-默认先运行 walk；在 MuJoCo 窗口中按 `M`（手柄按 `LT + 十字键下`）后，从机器人
-当前状态平滑切换到 Mimic 并从参考动作首帧开始播放。参考动作结束后，程序自动平滑切回
-walk，不会在策略交接时直接重置或跳变关节目标位置。
+策略和参考动作统一放在本目录的 `pt/zxh-*` 子目录，布局与
+`humanoid_rl_controllers/script/pt` 一致：
 
-运行 `USTC-Humanoid-Ultra-27dof-Mimic-RightStand` 一次性动作：
+```text
+pt/
+├── zxh-walk/
+│   └── policy.pt
+├── zxh-stand-leftarm/
+│   ├── policy.pt
+│   └── left_wrist_pitch_traj.csv
+├── zxh-mimic-pick/
+│   ├── policy.pt
+│   └── ustc1_pick_stand_transition.npz
+└── zxh-mimic-houtaitui/
+    ├── policy.pt
+    └── ustc1_rightstand_stand_transition.npz
+```
+
+不传 `--policy` 时默认加载以上四个策略，启动状态固定为 walk：
+
+```text
+stand <-- X / P --> walk
+                       ├── LT+RIGHT / M --> pick_play ------┐
+                       └── LT+DOWN  / H --> houtaitui_play -┤
+                                                          └--> walk
+```
+
+运行：
 
 ```bash
 cd /home/zxh/ustc_humanoid/unitree_mujoco
 conda activate gmr
 
-python sim2sim/humanoid_ultra/sim2sim.py \
-  --dof 27 \
-  --mimic-policy /home/zxh/unitree_rl_lab/logs/rsl_rl/ustc_humanoid_ultra_27dof_mimic_rightstand/2026-07-20_18-49-29/exported/policy.pt \
-  --motion-file /home/zxh/unitree_rl_lab/source/unitree_rl_lab/unitree_rl_lab/tasks/mimic/robots/humanoid_ultra_27dof/ustc1_rightstand/ustc1_rightstand.npz \
-  --no-elastic-band
+python sim2sim/humanoid_ultra/sim2sim.py --gamepad
 ```
 
-默认使用脚本顶部配置的 walk/stand 策略，`P` 仍负责 walk/stand 切换。只有当前
-策略为 walk 时才允许触发 Mimic；Mimic 播放期间按 `P` 可以提前中止并平滑返回
-walk。手柄组合键按下沿只触发一次，持续按住不会重复播放；手柄 `A` 只用于
-stand-leftarm 的左臂轨迹开关。策略交接使用 0.5 秒五次平滑曲线混合目标关节位置。
-触发时还会把动作首帧的躯干参考朝向对齐到机器人当前世界朝向，避免 walk 的
-航向与 NPZ 录制航向不同而产生瞬时大角度纠偏。接管混合期间参考保持在首帧，
-混合完成后才开始按 50 Hz 推进，因而不会跳过动作开头。
+Mimic 只能从 walk 触发。动作播放期间按手柄 `X` 或键盘 `P` 会提前返回
+walk。程序不再包含 `pick_prepare`、`pick_recover` 或 MuJoCo 专用基座稳定力；
+站立保持和动作过渡已经包含在两个训练 NPZ 中。
 
-参考动作按 50 Hz（与 `dt=0.005`、`decimation=4` 一致）逐帧播放。从指定参考帧
-开始可添加 `--mimic-start-frame FRAME`。Mimic 使用单帧 144 维观测，不使用
-普通站立/行走策略的 10 帧历史输入。
+每次策略切换仍保存当前实际关节目标，并用 0.5 秒五次曲线平滑混合到新策略输出。
+混合期间参考保持首帧，完成后才按 50 Hz 推进。Pick 的关节目标变化率限制为
+`4 rad/s`，houtaitui 为 `6 rad/s`。动作结束后使用同样的平滑混合返回 walk。
 
-仍可使用 `--mode mimic --policy ... --motion-file ...` 单独启动 Mimic，用于排查
-策略本身；这种单策略模式没有 walk 策略可返回，因此播放结束后保持最后一帧。
+Mimic 使用单帧 144 维观测，stand/walk 使用 10 帧历史。每个策略必须和自身训练
+使用的 NPZ 成对保存，不能交叉替换。
 
-新训练的 Mimic-Pick 已封装在 `../picksim2sim/`，其中使用仓库内相对路径保存
-策略和 `ustc1_pick.npz`；直接运行 `python sim2sim/picksim2sim/picksim2sim.py`
-即可进入 `walk → pick_prepare → pick_play → pick_recover → walk` 测试。
-Pick 首尾姿态与 walk 相差较大，因此该封装额外启用了固定关节过渡、交接门槛、
-目标限速和仅用于 MuJoCo 的临时基座稳定器；详细边界及可调参数见
-`../picksim2sim/README.md`。
+仍可使用 `--mode mimic --policy ... --motion-file ...` 单独启动某个 Mimic，
+用于排查策略本体；这种单策略模式没有 walk 策略可返回。
 
 ### 部署 Stand 策略
 
@@ -127,7 +137,7 @@ python sim2sim/humanoid_ultra/sim2sim.py \
   --policy /home/zxh/unitree_rl_lab/logs/rsl_rl/humanoidultra27dof_stand_leftarm/2026-06-30_01-48-26/exported/policy.pt
 ```
 
-脚本默认读取同目录的 `left_wrist_pitch_traj.csv`，按训练时相同的 Fourier
+脚本默认读取 `pt/zxh-stand-leftarm/left_wrist_pitch_traj.csv`，按训练时相同的 Fourier
 轨迹、6 秒周期、2 秒渐入和 `0.25` 参考速度缩放生成观测。按 `L` 可切换
 轨迹跟踪/返回默认姿态；启动时需要关闭轨迹可添加 `--no-left-arm-track`。
 使用其他轨迹文件时传入 `--left-arm-traj /absolute/path/to/traj.csv`。
@@ -166,7 +176,8 @@ A/D                    增加/减小横向速度
 Q/E 或 左/右方向键       增加/减小转向角速度
 X/空格                  所有速度指令清零
 P                      在 walk/stand 间切换；Mimic 中按下会返回 walk
-M                      从 walk 触发一次 Mimic 动作
+M                      从 walk 触发一次 Pick
+H                      从 walk 触发一次 houtaitui
 7/8                    缩短/加长弹力带
 9 或 B                  释放/重新连接弹力带
 R                      重置机器人并恢复默认弹力带状态
