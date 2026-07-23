@@ -134,13 +134,19 @@ python sim2sim/humanoid_ultra/sim2sim.py \
 python sim2sim/humanoid_ultra/sim2sim.py \
   --mode stand \
   --dof 27 \
-  --policy /home/zxh/unitree_rl_lab/logs/rsl_rl/humanoidultra27dof_stand_leftarm/2026-06-30_01-48-26/exported/policy.pt
+  --policy sim2sim/humanoid_ultra/pt/zxh-stand-leftarm/policy.pt
 ```
 
-脚本默认读取 `pt/zxh-stand-leftarm/left_wrist_pitch_traj.csv`，按训练时相同的 Fourier
-轨迹、6 秒周期、2 秒渐入和 `0.25` 参考速度缩放生成观测。按 `L` 可切换
-轨迹跟踪/返回默认姿态；启动时需要关闭轨迹可添加 `--no-left-arm-track`。
+脚本默认读取 `pt/zxh-stand-leftarm/left_wrist_pitch_traj.csv`，按新版训练相同的
+两段过渡生成观测：2 秒到安全展开姿态，再用 2 秒接入 6 秒 Fourier 轨迹，
+参考速度缩放为 `0.25`。按 `L` 关闭时按“轨迹 → 安全姿态 → stand 默认姿态”
+平滑返回；启动时需要关闭轨迹可添加 `--no-left-arm-track`。
 使用其他轨迹文件时传入 `--left-arm-traj /absolute/path/to/traj.csv`。
+
+新版 stand-leftarm 单独使用左肩 roll `+0.10`、右肩 roll `−0.10` 的训练默认值；
+walk 和 Mimic 保留原默认值，策略切换时脚本会同步切换对应的观测/动作零点。
+新 CSV 中部分 shoulder/wrist yaw 参考超过部署限位 `±2.5 rad`；MuJoCo 和实机
+都会保留限位裁剪，因此这些区段不会完全达到 CSV 参考角。
 
 Stand 模式默认关闭弹力带，与训练环境保持一致。需要吊带保护时显式添加
 `--elastic-band`。

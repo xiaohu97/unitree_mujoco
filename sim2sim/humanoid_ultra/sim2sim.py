@@ -738,17 +738,19 @@ class MimicMotion:
 
 
 class LeftArmTrajectory:
-    """Reproduce the 15-D left-arm command used by the Isaac Lab task."""
+    """Reproduce the new stand-leftarm safe-entry/exit command."""
 
     def __init__(
         self,
         traj_path: Path,
         profile: RobotProfile,
+        default_joint_pos: np.ndarray,
         enabled: bool,
         period: float = 6.0,
+        safe_time: float = 2.0,
         blend_time: float = 2.0,
         ref_vel_scale: float = 0.25,
-        start_phase: float = 1.5,
+        start_phase: float = 0.0,
     ):
         if profile.dof != 27:
             raise ValueError("Left-arm trajectory policies require the 27-DOF robot.")
@@ -774,37 +776,54 @@ class LeftArmTrajectory:
         self.omega = 2.0 * np.pi * harmonics / period
         joint_index = {name: index for index, name in enumerate(profile.joint_names)}
         self.default_q = np.asarray(
-            [profile.default_joint_pos[joint_index[name]] for name in LEFT_ARM_JOINTS],
+            [default_joint_pos[joint_index[name]] for name in LEFT_ARM_JOINTS],
+            dtype=np.float64,
+        )
+        self.safe_q = np.asarray(
+            [0.25, 0.15, -1.5707963, -0.6, 0.0, 0.0, 1.5707963],
             dtype=np.float64,
         )
         self.period = period
+        self.safe_time = safe_time
         self.blend_time = blend_time
         self.ref_vel_scale = ref_vel_scale
-        # Blending sweeps the arm along a straight joint-space path that is not
-        # collision-aware; starting near phase 0 (or 4.5s+) drives the wrist
-        # through the hip.  Offsetting the start phase keeps the blend clear.
         self.start_phase = start_phase
         self.default_enabled = enabled
         self.enabled = enabled
+        self.returning = False
         self.elapsed = 0.0
+        self.return_elapsed = 0.0
 
     def reset(self) -> None:
         self.enabled = self.default_enabled
+        self.returning = False
         self.elapsed = 0.0
+        self.return_elapsed = 0.0
 
     def toggle(self) -> None:
-        self.enabled = not self.enabled
-        if self.enabled:
-            self.elapsed = 0.0
-
-    def advance(self, dt: float) -> None:
-        self.elapsed += dt
-
-    def observation(self) -> np.ndarray:
         if not self.enabled:
-            return np.zeros(LEFT_ARM_COMMAND_DIM, dtype=np.float32)
+            self.enabled = True
+            self.returning = False
+            self.elapsed = 0.0
+            self.return_elapsed = 0.0
+        elif not self.returning:
+            self.returning = True
+            self.return_elapsed = 0.0
 
-        phase = (self.start_phase + self.elapsed) % self.period
+    @staticmethod
+    def _smoothstep(elapsed: float, duration: float) -> tuple[float, float]:
+        if duration <= 0.0:
+            return 1.0, 0.0
+        u = float(np.clip(elapsed / duration, 0.0, 1.0))
+        alpha = 6.0 * u**5 - 15.0 * u**4 + 10.0 * u**3
+        alpha_dot = (
+            30.0 * u**4 - 60.0 * u**3 + 30.0 * u**2
+        ) / duration
+        return alpha, alpha_dot
+
+    def _trajectory_reference(self) -> tuple[np.ndarray, np.ndarray]:
+        trajectory_elapsed = max(self.elapsed - self.safe_time, 0.0)
+        phase = (self.start_phase + trajectory_elapsed) % self.period
         angles = phase * self.omega
         cosines = np.cos(angles)
         sines = np.sin(angles)
@@ -813,22 +832,63 @@ class LeftArmTrajectory:
             -(sines * self.omega) @ self.cos_coeff
             + (cosines * self.omega) @ self.sin_coeff
         )
-        delta = q_traj - self.default_q
+        return q_traj, dq_traj
 
-        if self.blend_time > 0.0:
-            u = np.clip(self.elapsed / self.blend_time, 0.0, 1.0)
-            alpha = 6.0 * u**5 - 15.0 * u**4 + 10.0 * u**3
-            alpha_dot = (
-                30.0 * u**4 - 60.0 * u**3 + 30.0 * u**2
-            ) / self.blend_time
+    def advance(self, dt: float) -> None:
+        if not self.enabled:
+            return
+        self.elapsed += dt
+        if self.returning:
+            self.return_elapsed += dt
+            if self.return_elapsed >= self.blend_time + self.safe_time:
+                self.enabled = False
+                self.returning = False
+                self.elapsed = 0.0
+                self.return_elapsed = 0.0
+
+    def observation(self) -> np.ndarray:
+        if not self.enabled:
+            return np.zeros(LEFT_ARM_COMMAND_DIM, dtype=np.float32)
+
+        q_traj, dq_traj = self._trajectory_reference()
+        if self.returning:
+            if self.return_elapsed < self.blend_time:
+                gamma, gamma_dot = self._smoothstep(
+                    self.return_elapsed, self.blend_time
+                )
+                q_ref = q_traj + gamma * (self.safe_q - q_traj)
+                dq_ref = (
+                    (1.0 - gamma) * dq_traj
+                    + gamma_dot * (self.safe_q - q_traj)
+                )
+            else:
+                eta, eta_dot = self._smoothstep(
+                    self.return_elapsed - self.blend_time, self.safe_time
+                )
+                q_ref = self.safe_q + eta * (self.default_q - self.safe_q)
+                dq_ref = eta_dot * (self.default_q - self.safe_q)
+        elif self.elapsed < self.safe_time:
+            alpha, alpha_dot = self._smoothstep(self.elapsed, self.safe_time)
+            safe_delta = self.safe_q - self.default_q
+            q_ref = self.default_q + alpha * safe_delta
+            dq_ref = alpha_dot * safe_delta
+        elif self.elapsed < self.safe_time + self.blend_time:
+            beta, beta_dot = self._smoothstep(
+                self.elapsed - self.safe_time, self.blend_time
+            )
+            track_delta = q_traj - self.safe_q
+            q_ref = self.safe_q + beta * track_delta
+            dq_ref = beta_dot * track_delta + beta * dq_traj
         else:
-            alpha = 1.0
-            alpha_dot = 0.0
+            q_ref = q_traj
+            dq_ref = dq_traj
 
-        q_ref_rel = alpha * delta
-        dq_ref = alpha_dot * delta + alpha * dq_traj
         return np.concatenate(
-            (q_ref_rel, dq_ref * self.ref_vel_scale, np.ones(1))
+            (
+                q_ref - self.default_q,
+                dq_ref * self.ref_vel_scale,
+                np.ones(1),
+            )
         ).astype(np.float32)
 
 
@@ -1067,6 +1127,15 @@ class HumanoidUltraSim2Sim:
                     f"Policy shape mismatch ({spec.name}): expected [1, {self.profile.dof}], "
                     f"got {getattr(test_output, 'shape', type(test_output))}"
                 )
+            default_joint_pos = self.profile.default_joint_pos.copy()
+            if uses_left_arm:
+                joint_index = {
+                    name: index for index, name in enumerate(self.profile.joint_names)
+                }
+                # The new stand-leftarm run uses the current Isaac asset
+                # defaults; other loaded policies retain their trained defaults.
+                default_joint_pos[joint_index["left_shoulder_roll_joint"]] = 0.10
+                default_joint_pos[joint_index["right_shoulder_roll_joint"]] = -0.10
             self.policy_entries.append(
                 {
                     "name": spec.name,
@@ -1074,6 +1143,7 @@ class HumanoidUltraSim2Sim:
                     "policy": policy,
                     "uses_left_arm": uses_left_arm,
                     "uses_mimic": uses_mimic,
+                    "default_joint_pos": default_joint_pos,
                 }
             )
         self.active_policy_index = 0
@@ -1100,12 +1170,16 @@ class HumanoidUltraSim2Sim:
             }
 
         if any(entry["uses_left_arm"] for entry in self.policy_entries):
+            left_arm_entry = next(
+                entry for entry in self.policy_entries if entry["uses_left_arm"]
+            )
             trajectory_path = left_arm_traj_path or Path(__file__).with_name(
                 "left_wrist_pitch_traj.csv"
             )
             self.left_arm_trajectory = LeftArmTrajectory(
                 trajectory_path.resolve(),
                 self.profile,
+                left_arm_entry["default_joint_pos"],
                 left_arm_enabled,
                 start_phase=left_arm_start_phase,
             )
@@ -1113,7 +1187,7 @@ class HumanoidUltraSim2Sim:
             self.left_arm_trajectory = None
         self.command = command.astype(np.float64)
         self.previous_action = np.zeros(self.profile.dof, dtype=np.float64)
-        self.target_joint_pos = self.profile.default_joint_pos.copy()
+        self.target_joint_pos = self.policy_entries[0]["default_joint_pos"].copy()
         self.observation_history: deque[np.ndarray] = deque(maxlen=self.HISTORY_LENGTH)
         self.policy_transition_start: np.ndarray | None = None
         self.policy_transition_elapsed = 0.0
@@ -1132,6 +1206,10 @@ class HumanoidUltraSim2Sim:
     @property
     def active_mode(self) -> str:
         return self.active_entry["mode"]
+
+    @property
+    def active_default_joint_pos(self) -> np.ndarray:
+        return self.active_entry["default_joint_pos"]
 
     @property
     def control_state(self) -> str:
@@ -1198,7 +1276,7 @@ class HumanoidUltraSim2Sim:
         self.active_policy_index = policy_index
         self.observation_history.clear()
         self.previous_action = np.clip(
-            (self.target_joint_pos - self.profile.default_joint_pos) / self.ACTION_SCALE,
+            (self.target_joint_pos - self.active_default_joint_pos) / self.ACTION_SCALE,
             -100.0,
             100.0,
         ).astype(np.float64)
@@ -1227,7 +1305,7 @@ class HumanoidUltraSim2Sim:
             self.profile.position_limits[:, 1],
         )
         self.previous_action = np.clip(
-            (self.target_joint_pos - self.profile.default_joint_pos) / self.ACTION_SCALE,
+            (self.target_joint_pos - self.active_default_joint_pos) / self.ACTION_SCALE,
             -100.0,
             100.0,
         ).astype(np.float64)
@@ -1302,8 +1380,8 @@ class HumanoidUltraSim2Sim:
             )
             self.data.qpos[:3] = (0.0, 0.0, root_height)
             self.data.qpos[3:7] = (1.0, 0.0, 0.0, 0.0)
-            self.data.qpos[self.qpos_indices] = self.profile.default_joint_pos
-            self.target_joint_pos[:] = self.profile.default_joint_pos
+            self.data.qpos[self.qpos_indices] = self.active_default_joint_pos
+            self.target_joint_pos[:] = self.active_default_joint_pos
         if self.left_arm_trajectory is not None:
             self.left_arm_trajectory.reset()
         mujoco.mj_forward(self.model, self.data)
@@ -1322,7 +1400,7 @@ class HumanoidUltraSim2Sim:
             body_angular_velocity,
             projected_gravity,
             self.command,
-            joint_pos - self.profile.default_joint_pos,
+            joint_pos - self.active_default_joint_pos,
             joint_vel,
             self.previous_action,
         ]
@@ -1350,7 +1428,7 @@ class HumanoidUltraSim2Sim:
                 motion.command,
                 relative_anchor_rotation_6d,
                 body_angular_velocity,
-                joint_pos - self.profile.default_joint_pos,
+                joint_pos - self.active_default_joint_pos,
                 joint_vel,
                 self.previous_action,
             )
@@ -1377,7 +1455,7 @@ class HumanoidUltraSim2Sim:
             )
         requested_action = np.clip(action, -100.0, 100.0).astype(np.float64)
         requested_target = np.clip(
-            self.profile.default_joint_pos + self.ACTION_SCALE * requested_action,
+            self.active_default_joint_pos + self.ACTION_SCALE * requested_action,
             self.profile.position_limits[:, 0],
             self.profile.position_limits[:, 1],
         )
@@ -1404,7 +1482,7 @@ class HumanoidUltraSim2Sim:
         else:
             self.target_joint_pos = next_target
             self.previous_action = np.clip(
-                (self.target_joint_pos - self.profile.default_joint_pos) / self.ACTION_SCALE,
+                (self.target_joint_pos - self.active_default_joint_pos) / self.ACTION_SCALE,
                 -100.0,
                 100.0,
             ).astype(np.float64)
@@ -1556,10 +1634,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--left-arm-start-phase",
         type=float,
-        default=1.5,
-        help="Trajectory phase [s] the left-arm blend starts from. Phases in "
-        "0.75-3.75 keep the blend path collision-free; 0 sweeps the wrist "
-        "through the hip.",
+        default=0.0,
+        help="Trajectory phase [s] used after the 2 s safe-pose entry stage.",
     )
     arm_group = parser.add_mutually_exclusive_group()
     arm_group.add_argument(
@@ -1783,7 +1859,11 @@ def main() -> None:
         arm_status = (
             "N/A"
             if simulator.left_arm_trajectory is None
-            else "ON" if simulator.left_arm_trajectory.enabled else "OFF"
+            else "RETURNING"
+            if simulator.left_arm_trajectory.returning
+            else "ON"
+            if simulator.left_arm_trajectory.enabled
+            else "OFF"
         )
         if simulator.active_mode == "mimic":
             motion = simulator.active_mimic_motion
