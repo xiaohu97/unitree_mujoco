@@ -892,6 +892,877 @@ class LeftArmTrajectory:
         ).astype(np.float32)
 
 
+class TelemetryWaveform:
+    """Draw recent Sim2Sim telemetry in a non-blocking OpenCV window."""
+
+    WINDOW_NAME = "Humanoid Ultra - Live Waveforms"
+    WIDTH = 1400
+    HEIGHT = 1000
+    HEADER_HEIGHT = 82
+    WINDOW_PRESETS = (1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0)
+    MIN_WINDOW_SECONDS = WINDOW_PRESETS[0]
+    MAX_WINDOW_SECONDS = WINDOW_PRESETS[-1]
+    BACKGROUND = (242, 242, 242)
+    PANEL_BACKGROUND = (255, 255, 255)
+    GRID_COLOR = (220, 220, 220)
+    TEXT_COLOR = (35, 35, 35)
+    BUTTON_COLOR = (232, 232, 232)
+    BUTTON_ACTIVE_COLOR = (80, 170, 235)
+    BUTTON_BORDER_COLOR = (145, 145, 145)
+    COLORS = (
+        (200, 70, 40),
+        (40, 130, 220),
+        (40, 170, 80),
+        (180, 70, 180),
+        (40, 180, 190),
+        (120, 100, 40),
+        (230, 150, 60),
+        (90, 60, 210),
+        (170, 170, 40),
+        (70, 190, 150),
+        (200, 90, 130),
+        (120, 120, 210),
+        (80, 80, 80),
+        (150, 70, 30),
+        (30, 150, 150),
+        (150, 40, 100),
+    )
+
+    def __init__(
+        self,
+        simulator,
+        window_seconds: float,
+        refresh_hz: float,
+        joint_names: tuple[str, ...],
+        torque_joint_names: tuple[str, ...] = (),
+        save_directory: Path | None = None,
+        show_window: bool = True,
+    ):
+        import cv2
+
+        if refresh_hz <= 0.0:
+            raise ValueError("Waveform refresh rate must be positive.")
+        if not self.MIN_WINDOW_SECONDS <= window_seconds <= self.MAX_WINDOW_SECONDS:
+            raise ValueError(
+                "Waveform window must be between "
+                f"{self.MIN_WINDOW_SECONDS:g} and "
+                f"{self.MAX_WINDOW_SECONDS:g} seconds."
+            )
+        preferred_joints = (
+            "left_knee_joint",
+            "right_knee_joint",
+            "left_shoulder_roll_joint",
+            "left_wrist_yaw_joint",
+        )
+        if not joint_names:
+            joint_names = tuple(
+                name for name in preferred_joints if name in simulator.profile.joint_names
+            )
+        missing = [name for name in joint_names if name not in simulator.profile.joint_names]
+        if missing:
+            raise ValueError(
+                "Unknown --plot-joints {}. Available joints: {}".format(
+                    missing, ", ".join(simulator.profile.joint_names)
+                )
+            )
+        if not 1 <= len(joint_names) <= len(self.COLORS):
+            raise ValueError(
+                f"--plot-joints must select between 1 and {len(self.COLORS)} joints."
+            )
+        preferred_torque_joints = (
+            "left_hip_roll_joint",
+            "left_hip_yaw_joint",
+            "left_hip_pitch_joint",
+            "left_knee_joint",
+            "left_ankle_pitch_joint",
+            "left_ankle_roll_joint",
+            "right_hip_roll_joint",
+            "right_hip_yaw_joint",
+            "right_hip_pitch_joint",
+            "right_knee_joint",
+            "right_ankle_pitch_joint",
+            "right_ankle_roll_joint",
+        )
+        if not torque_joint_names:
+            torque_joint_names = tuple(
+                name
+                for name in preferred_torque_joints
+                if name in simulator.profile.joint_names
+            )
+        missing_torque = [
+            name
+            for name in torque_joint_names
+            if name not in simulator.profile.joint_names
+        ]
+        if missing_torque:
+            raise ValueError(
+                "Unknown --plot-torque-joints {}. Available joints: {}".format(
+                    missing_torque, ", ".join(simulator.profile.joint_names)
+                )
+            )
+        if not 1 <= len(torque_joint_names) <= len(self.COLORS):
+            raise ValueError(
+                "--plot-torque-joints must select between 1 and "
+                f"{len(self.COLORS)} joints."
+            )
+
+        self.cv2 = cv2
+        self.window_seconds = float(window_seconds)
+        self.refresh_period = 1.0 / float(refresh_hz)
+        self.save_directory = (
+            SCRIPT_DIR / "waveform_data"
+            if save_directory is None
+            else Path(save_directory)
+        )
+        self.joint_names = tuple(joint_names)
+        self.torque_joint_names = tuple(torque_joint_names)
+        self.joint_indices = {
+            name: simulator.profile.joint_names.index(name) for name in self.joint_names
+        }
+        self.torque_joint_indices = {
+            name: simulator.profile.joint_names.index(name)
+            for name in self.torque_joint_names
+        }
+        max_points = max(
+            2,
+            int(
+                np.ceil(
+                    self.MAX_WINDOW_SECONDS
+                    / (simulator.SIM_DT * simulator.CONTROL_DECIMATION)
+                )
+            )
+            + 1,
+        )
+        self.times = deque(maxlen=max_points)
+        self.states = deque(maxlen=max_points)
+        self.policies = deque(maxlen=max_points)
+        self.base_z = deque(maxlen=max_points)
+        self.rpy = [deque(maxlen=max_points) for _ in range(3)]
+        self.body_velocity = [deque(maxlen=max_points) for _ in range(3)]
+        self.gyro = [deque(maxlen=max_points) for _ in range(3)]
+        self.command = [deque(maxlen=max_points) for _ in range(3)]
+        self.error_rms = deque(maxlen=max_points)
+        self.error_max = deque(maxlen=max_points)
+        self.joint_actual = {
+            name: deque(maxlen=max_points) for name in self.joint_names
+        }
+        self.joint_target = {
+            name: deque(maxlen=max_points) for name in self.joint_names
+        }
+        self.joint_torque = {
+            name: deque(maxlen=max_points) for name in self.torque_joint_names
+        }
+        self.last_draw_time = -np.inf
+        self.last_frame = np.full(
+            (self.HEIGHT, self.WIDTH, 3), self.BACKGROUND, dtype=np.uint8
+        )
+        self.paused = False
+        self.pending_actions = deque()
+        self.redraw_requested = True
+        self.status_message = "50 Hz sampling"
+        self.button_rects: dict[str, tuple[int, int, int, int]] = {}
+        self.show_window = bool(show_window)
+        self.render_when_hidden = not self.show_window
+        if self.show_window:
+            try:
+                self.cv2.namedWindow(self.WINDOW_NAME, self.cv2.WINDOW_NORMAL)
+                self.cv2.resizeWindow(self.WINDOW_NAME, self.WIDTH, self.HEIGHT)
+                self.cv2.imshow(self.WINDOW_NAME, self.last_frame)
+                self.cv2.setMouseCallback(
+                    self.WINDOW_NAME, self._mouse_callback
+                )
+                self.cv2.waitKey(1)
+            except self.cv2.error as exc:
+                raise RuntimeError(
+                    "Cannot open the waveform window. Run from a graphical desktop "
+                    "or omit --plot."
+                ) from exc
+
+    @staticmethod
+    def _short_joint_name(name: str) -> str:
+        return (
+            name.replace("left_", "L_")
+            .replace("right_", "R_")
+            .replace("_joint", "")
+            .replace("_", " ")
+        )
+
+    def _clear_data(self) -> None:
+        self.times.clear()
+        self.states.clear()
+        self.policies.clear()
+        self.base_z.clear()
+        self.error_rms.clear()
+        self.error_max.clear()
+        for group in (self.rpy, self.body_velocity, self.gyro, self.command):
+            for values in group:
+                values.clear()
+        for group in (
+            self.joint_actual,
+            self.joint_target,
+            self.joint_torque,
+        ):
+            for values in group.values():
+                values.clear()
+
+    def _mouse_callback(self, event, x, y, _flags, _param) -> None:
+        if event != self.cv2.EVENT_LBUTTONUP:
+            return
+        for action, (x0, y0, x1, y1) in self.button_rects.items():
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                self.pending_actions.append(action)
+                return
+
+    def _change_window(self, direction: int) -> None:
+        if direction < 0:
+            candidates = [
+                value
+                for value in self.WINDOW_PRESETS
+                if value < self.window_seconds - 1.0e-6
+            ]
+            new_value = candidates[-1] if candidates else self.WINDOW_PRESETS[0]
+        else:
+            candidates = [
+                value
+                for value in self.WINDOW_PRESETS
+                if value > self.window_seconds + 1.0e-6
+            ]
+            new_value = candidates[0] if candidates else self.WINDOW_PRESETS[-1]
+        self.window_seconds = float(new_value)
+        self.status_message = f"Display window: {self.window_seconds:g} s"
+        self.redraw_requested = True
+
+    def _save_csv(self) -> None:
+        if not self.times:
+            self.status_message = "No waveform data to save"
+            self.redraw_requested = True
+            return
+
+        import csv
+        from datetime import datetime
+
+        times = np.asarray(self.times, dtype=np.float64)
+        first_index = int(
+            np.searchsorted(times, times[-1] - self.window_seconds, side="left")
+        )
+        states = list(self.states)
+        policies = list(self.policies)
+        command = [np.asarray(values) for values in self.command]
+        base_z = np.asarray(self.base_z)
+        rpy = [np.asarray(values) for values in self.rpy]
+        body_velocity = [np.asarray(values) for values in self.body_velocity]
+        gyro = [np.asarray(values) for values in self.gyro]
+        error_rms = np.asarray(self.error_rms)
+        error_max = np.asarray(self.error_max)
+        joint_actual = {
+            name: np.asarray(values) for name, values in self.joint_actual.items()
+        }
+        joint_target = {
+            name: np.asarray(values) for name, values in self.joint_target.items()
+        }
+        joint_torque = {
+            name: np.asarray(values) for name, values in self.joint_torque.items()
+        }
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = self.save_directory / f"humanoid_ultra_waveform_{timestamp}.csv"
+        header = [
+            "time_s",
+            "control_state",
+            "policy",
+            "command_c0",
+            "command_c1",
+            "command_c2",
+            "base_height_m",
+            "roll_deg",
+            "pitch_deg",
+            "yaw_deg",
+            "body_vx_m_s",
+            "body_vy_m_s",
+            "body_vz_m_s",
+            "body_wx_rad_s",
+            "body_wy_rad_s",
+            "body_wz_rad_s",
+            "pd_error_rms_rad",
+            "pd_error_max_abs_rad",
+        ]
+        for name in self.joint_names:
+            header.extend(
+                (
+                    f"{name}_position_rad",
+                    f"{name}_pd_target_rad",
+                )
+            )
+        for name in self.torque_joint_names:
+            header.append(f"{name}_actuator_torque_nm")
+
+        try:
+            self.save_directory.mkdir(parents=True, exist_ok=True)
+            with path.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(header)
+                for index in range(first_index, len(times)):
+                    row = [
+                        times[index],
+                        states[index],
+                        policies[index],
+                        command[0][index],
+                        command[1][index],
+                        command[2][index],
+                        base_z[index],
+                        rpy[0][index],
+                        rpy[1][index],
+                        rpy[2][index],
+                        body_velocity[0][index],
+                        body_velocity[1][index],
+                        body_velocity[2][index],
+                        gyro[0][index],
+                        gyro[1][index],
+                        gyro[2][index],
+                        error_rms[index],
+                        error_max[index],
+                    ]
+                    for name in self.joint_names:
+                        row.extend(
+                            (
+                                joint_actual[name][index],
+                                joint_target[name][index],
+                            )
+                        )
+                    for name in self.torque_joint_names:
+                        row.append(joint_torque[name][index])
+                    writer.writerow(row)
+        except OSError as exc:
+            self.status_message = f"Save failed: {exc}"
+            print(f"Waveform CSV save failed: {exc}")
+        else:
+            sample_count = len(times) - first_index
+            self.status_message = f"Saved {sample_count} samples: {path.name}"
+            print(f"Waveform CSV saved: {path} ({sample_count} samples)")
+        self.redraw_requested = True
+
+    def _process_pending_actions(self) -> None:
+        while self.pending_actions:
+            action = self.pending_actions.popleft()
+            if action == "window_down":
+                self._change_window(-1)
+            elif action == "window_up":
+                self._change_window(1)
+            elif action == "pause":
+                self.paused = not self.paused
+                self.status_message = (
+                    "Waveform sampling paused; simulation still running"
+                    if self.paused
+                    else "Waveform sampling resumed"
+                )
+                self.redraw_requested = True
+            elif action == "save":
+                self._save_csv()
+
+    def sample(self, simulator) -> None:
+        self._process_pending_actions()
+        sim_time = float(simulator.data.time)
+        if self.times and sim_time < self.times[-1]:
+            self._clear_data()
+            self.last_draw_time = -np.inf
+            self.status_message = "Simulation reset; waveform buffer cleared"
+            self.redraw_requested = True
+
+        if not self.paused:
+            joint_pos = simulator.data.qpos[simulator.qpos_indices].copy()
+            joint_target = simulator.target_joint_pos.copy()
+            joint_error = joint_target - joint_pos
+            body_rotation = quaternion_to_rotation_matrix(simulator.data.qpos[3:7])
+            roll = np.arctan2(body_rotation[2, 1], body_rotation[2, 2])
+            pitch = np.arctan2(
+                -body_rotation[2, 0],
+                np.hypot(body_rotation[2, 1], body_rotation[2, 2]),
+            )
+            yaw = np.arctan2(body_rotation[1, 0], body_rotation[0, 0])
+            rpy_deg = np.rad2deg((roll, pitch, yaw))
+            body_velocity = simulator.data.sensor("BodyVel").data.copy()
+            gyro = simulator.data.sensor("BodyGyro").data.copy()
+            joint_torque = simulator.data.qfrc_actuator[
+                simulator.qvel_indices
+            ].copy()
+
+            self.times.append(sim_time)
+            self.states.append(simulator.control_state)
+            self.policies.append(simulator.active_name)
+            self.base_z.append(float(simulator.data.qpos[2]))
+            for index in range(3):
+                self.rpy[index].append(float(rpy_deg[index]))
+                self.body_velocity[index].append(float(body_velocity[index]))
+                self.gyro[index].append(float(gyro[index]))
+                self.command[index].append(float(simulator.command[index]))
+            self.error_rms.append(float(np.sqrt(np.mean(np.square(joint_error)))))
+            self.error_max.append(float(np.max(np.abs(joint_error))))
+            for name, index in self.joint_indices.items():
+                self.joint_actual[name].append(float(joint_pos[index]))
+                self.joint_target[name].append(float(joint_target[index]))
+            for name, index in self.torque_joint_indices.items():
+                self.joint_torque[name].append(float(joint_torque[index]))
+
+        draw_due = sim_time - self.last_draw_time >= self.refresh_period
+        if draw_due and (self.show_window or self.render_when_hidden):
+            if not self.paused or self.redraw_requested:
+                self.last_frame = self.render_frame(simulator)
+                self.redraw_requested = False
+            self.last_draw_time = sim_time
+            if self.show_window:
+                self._show()
+
+    def _show(self) -> None:
+        try:
+            visible = self.cv2.getWindowProperty(
+                self.WINDOW_NAME, self.cv2.WND_PROP_VISIBLE
+            )
+        except self.cv2.error:
+            visible = 0.0
+        if visible < 1.0:
+            self.show_window = False
+            return
+        self.cv2.imshow(self.WINDOW_NAME, self.last_frame)
+        key = self.cv2.waitKey(1) & 0xFF
+        if key == 27:  # Escape closes only the waveform window.
+            self.close()
+        elif key in (ord("-"), ord("_"), ord("[")):
+            self.pending_actions.append("window_down")
+        elif key in (ord("+"), ord("="), ord("]")):
+            self.pending_actions.append("window_up")
+        elif key == ord(" "):
+            self.pending_actions.append("pause")
+        elif key in (ord("s"), ord("S")):
+            self.pending_actions.append("save")
+
+    def _draw_control_button(
+        self,
+        image,
+        action: str | None,
+        label: str,
+        rect: tuple[int, int, int, int],
+        active: bool = False,
+    ) -> None:
+        x0, y0, width, height = rect
+        color = self.BUTTON_ACTIVE_COLOR if active else self.BUTTON_COLOR
+        self.cv2.rectangle(
+            image, (x0, y0), (x0 + width, y0 + height), color, thickness=-1
+        )
+        self.cv2.rectangle(
+            image,
+            (x0, y0),
+            (x0 + width, y0 + height),
+            self.BUTTON_BORDER_COLOR,
+            thickness=1,
+        )
+        text_size, _ = self.cv2.getTextSize(
+            label, self.cv2.FONT_HERSHEY_SIMPLEX, 0.43, 1
+        )
+        text_x = x0 + max(5, (width - text_size[0]) // 2)
+        text_y = y0 + (height + text_size[1]) // 2
+        self.cv2.putText(
+            image,
+            label,
+            (text_x, text_y),
+            self.cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            self.TEXT_COLOR,
+            1,
+            self.cv2.LINE_AA,
+        )
+        if action is not None:
+            self.button_rects[action] = (x0, y0, x0 + width, y0 + height)
+
+    def _draw_header(self, image, simulator) -> None:
+        self.button_rects.clear()
+        state_color = (40, 80, 210) if self.paused else (40, 145, 60)
+        state_label = "PAUSED" if self.paused else "RECORDING"
+        self.cv2.circle(image, (27, 25), 7, state_color, thickness=-1)
+        self.cv2.putText(
+            image,
+            (
+                f"{state_label}   state={simulator.control_state}   "
+                f"policy={simulator.active_name}"
+            ),
+            (42, 31),
+            self.cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            self.TEXT_COLOR,
+            1,
+            self.cv2.LINE_AA,
+        )
+        self.cv2.putText(
+            image,
+            "Joint position: solid=actual, dash=PD target",
+            (930, 30),
+            self.cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (85, 85, 85),
+            1,
+            self.cv2.LINE_AA,
+        )
+
+        y = 43
+        self._draw_control_button(
+            image, "window_down", "Window -  [-]", (20, y, 118, 30)
+        )
+        self._draw_control_button(
+            image, None, f"{self.window_seconds:g} s", (146, y, 76, 30)
+        )
+        self._draw_control_button(
+            image, "window_up", "Window +  [+]", (230, y, 118, 30)
+        )
+        self._draw_control_button(
+            image,
+            "pause",
+            "Resume  [Space]" if self.paused else "Pause  [Space]",
+            (362, y, 154, 30),
+            active=self.paused,
+        )
+        self._draw_control_button(
+            image, "save", "Save CSV  [S]", (524, y, 134, 30)
+        )
+        message = self.status_message
+        if len(message) > 90:
+            message = message[:87] + "..."
+        self.cv2.putText(
+            image,
+            message,
+            (675, 63),
+            self.cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            (75, 75, 75),
+            1,
+            self.cv2.LINE_AA,
+        )
+
+    def _draw_panel(self, image, rect, title, series) -> None:
+        x0, y0, width, height = rect
+        cv2 = self.cv2
+        cv2.rectangle(
+            image,
+            (x0, y0),
+            (x0 + width, y0 + height),
+            self.PANEL_BACKGROUND,
+            thickness=-1,
+        )
+        cv2.rectangle(
+            image,
+            (x0, y0),
+            (x0 + width, y0 + height),
+            (180, 180, 180),
+            thickness=1,
+        )
+        cv2.putText(
+            image,
+            title,
+            (x0 + 10, y0 + 22),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            self.TEXT_COLOR,
+            1,
+            cv2.LINE_AA,
+        )
+
+        labeled = [(label, color) for label, _, color, _ in series if label]
+        legend_x = x0 + 10
+        legend_y = y0 + 38
+        for label, color in labeled:
+            legend_width = max(80, 32 + 7 * len(label))
+            if legend_x + legend_width > x0 + width - 10:
+                legend_x = x0 + 10
+                legend_y += 18
+            cv2.line(
+                image,
+                (legend_x, legend_y),
+                (legend_x + 18, legend_y),
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                image,
+                label,
+                (legend_x + 23, legend_y + 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                self.TEXT_COLOR,
+                1,
+                cv2.LINE_AA,
+            )
+            legend_x += legend_width
+
+        plot_left = x0 + 52
+        plot_right = x0 + width - 12
+        plot_top = max(y0 + 52, legend_y + 14)
+        plot_bottom = y0 + height - 30
+        if len(self.times) < 2:
+            cv2.putText(
+                image,
+                "waiting for samples...",
+                (plot_left + 20, plot_top + 35),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (120, 120, 120),
+                1,
+                cv2.LINE_AA,
+            )
+            return
+
+        times = np.asarray(self.times, dtype=np.float64)
+        time_max = times[-1]
+        time_min = max(times[0], time_max - self.window_seconds)
+        mask = times >= time_min
+        times = times[mask]
+        segment_ids = np.cumsum(
+            np.concatenate(
+                (
+                    np.zeros(1, dtype=np.int32),
+                    (np.diff(times) > 0.1).astype(np.int32),
+                )
+            )
+        )
+        values_by_series = []
+        finite_values = []
+        for _, values, _, _ in series:
+            array = np.asarray(values, dtype=np.float64)[mask]
+            values_by_series.append(array)
+            finite_values.extend(array[np.isfinite(array)].tolist())
+        if not finite_values:
+            return
+        value_min = float(np.min(finite_values))
+        value_max = float(np.max(finite_values))
+        if np.isclose(value_min, value_max):
+            padding = max(0.05, abs(value_min) * 0.1)
+        else:
+            padding = 0.1 * (value_max - value_min)
+        value_min -= padding
+        value_max += padding
+
+        max_draw_points = max(200, 2 * (plot_right - plot_left))
+        if len(times) > max_draw_points:
+            draw_indices = np.linspace(
+                0, len(times) - 1, max_draw_points, dtype=np.int32
+            )
+            draw_indices = np.unique(draw_indices)
+            times = times[draw_indices]
+            segment_ids = segment_ids[draw_indices]
+            values_by_series = [
+                values[draw_indices] for values in values_by_series
+            ]
+
+        for fraction in np.linspace(0.0, 1.0, 5):
+            x = int(plot_left + fraction * (plot_right - plot_left))
+            y = int(plot_top + fraction * (plot_bottom - plot_top))
+            cv2.line(
+                image, (x, plot_top), (x, plot_bottom), self.GRID_COLOR, 1
+            )
+            cv2.line(
+                image, (plot_left, y), (plot_right, y), self.GRID_COLOR, 1
+            )
+
+        cv2.putText(
+            image,
+            f"{value_max:.3g}",
+            (x0 + 3, plot_top + 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            self.TEXT_COLOR,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            f"{value_min:.3g}",
+            (x0 + 3, plot_bottom + 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            self.TEXT_COLOR,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            f"{time_min:.1f}s",
+            (plot_left, y0 + height - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            self.TEXT_COLOR,
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            f"{time_max:.1f}s",
+            (plot_right - 42, y0 + height - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.35,
+            self.TEXT_COLOR,
+            1,
+            cv2.LINE_AA,
+        )
+
+        time_span = max(time_max - time_min, 1.0e-6)
+        value_span = max(value_max - value_min, 1.0e-6)
+        x_pixels = plot_left + (times - time_min) / time_span * (
+            plot_right - plot_left
+        )
+        for (_, _, color, style), values in zip(series, values_by_series):
+            y_pixels = plot_bottom - (values - value_min) / value_span * (
+                plot_bottom - plot_top
+            )
+            for index in range(1, len(times)):
+                if not (
+                    np.isfinite(y_pixels[index - 1])
+                    and np.isfinite(y_pixels[index])
+                ):
+                    continue
+                if segment_ids[index] != segment_ids[index - 1]:
+                    continue
+                if style == "dash" and (index // 4) % 2:
+                    continue
+                if style == "dot" and index % 4:
+                    continue
+                cv2.line(
+                    image,
+                    (int(x_pixels[index - 1]), int(y_pixels[index - 1])),
+                    (int(x_pixels[index]), int(y_pixels[index])),
+                    color,
+                    2 if style == "solid" else 1,
+                    cv2.LINE_AA,
+                )
+
+    def render_frame(self, simulator) -> np.ndarray:
+        image = np.full(
+            (self.HEIGHT, self.WIDTH, 3), self.BACKGROUND, dtype=np.uint8
+        )
+        self._draw_header(image, simulator)
+        margin = 18
+        header = self.HEADER_HEIGHT
+        gap = 14
+        panel_width = (self.WIDTH - 2 * margin - gap) // 2
+        torque_panel_height = 245
+        panel_height = (
+            self.HEIGHT
+            - header
+            - margin
+            - torque_panel_height
+            - 3 * gap
+        ) // 3
+        panels = []
+        for row in range(3):
+            for column in range(2):
+                panels.append(
+                    (
+                        margin + column * (panel_width + gap),
+                        header + row * (panel_height + gap),
+                        panel_width,
+                        panel_height,
+                    )
+                )
+        torque_y = header + 3 * panel_height + 3 * gap
+        torque_panel = (
+            margin,
+            torque_y,
+            self.WIDTH - 2 * margin,
+            self.HEIGHT - margin - torque_y,
+        )
+
+        self._draw_panel(
+            image,
+            panels[0],
+            "Policy command [c0, c1, c2]",
+            tuple(
+                (f"c{index}", values, self.COLORS[index], "solid")
+                for index, values in enumerate(self.command)
+            ),
+        )
+        self._draw_panel(
+            image,
+            panels[1],
+            "Base height [m]",
+            (("base z", self.base_z, self.COLORS[0], "solid"),),
+        )
+        self._draw_panel(
+            image,
+            panels[2],
+            "Base orientation [deg]",
+            tuple(
+                (name, values, color, "solid")
+                for name, values, color in zip(
+                    ("roll", "pitch", "yaw"), self.rpy, self.COLORS
+                )
+            ),
+        )
+        self._draw_panel(
+            image,
+            panels[3],
+            "Body linear velocity [m/s]",
+            tuple(
+                (axis, values, color, "solid")
+                for axis, values, color in zip(
+                    ("vx", "vy", "vz"), self.body_velocity, self.COLORS
+                )
+            ),
+        )
+        self._draw_panel(
+            image,
+            panels[4],
+            "Body angular velocity [rad/s]",
+            tuple(
+                (axis, values, color, "solid")
+                for axis, values, color in zip(
+                    ("wx", "wy", "wz"), self.gyro, self.COLORS
+                )
+            ),
+        )
+        joint_series = []
+        for joint_number, name in enumerate(self.joint_names):
+            color = self.COLORS[joint_number]
+            joint_series.extend(
+                (
+                    (
+                        self._short_joint_name(name),
+                        self.joint_actual[name],
+                        color,
+                        "solid",
+                    ),
+                    ("", self.joint_target[name], color, "dash"),
+                )
+            )
+        self._draw_panel(
+            image,
+            panels[5],
+            "Selected joint position [rad]",
+            tuple(joint_series),
+        )
+        torque_series = tuple(
+            (
+                self._short_joint_name(name),
+                self.joint_torque[name],
+                self.COLORS[joint_number],
+                "solid",
+            )
+            for joint_number, name in enumerate(self.torque_joint_names)
+        )
+        self._draw_panel(
+            image,
+            torque_panel,
+            "Leg joint actuator torque [N m]",
+            torque_series,
+        )
+        return image
+
+    def close(self) -> None:
+        if not self.show_window:
+            return
+        self.show_window = False
+        try:
+            self.cv2.destroyWindow(self.WINDOW_NAME)
+            self.cv2.waitKey(1)
+        except self.cv2.error:
+            pass
+
+
 class ElasticBand:
     """Apply two spring-damper suspension forces at the shoulder sockets."""
 
@@ -1699,6 +2570,43 @@ def parse_args() -> argparse.Namespace:
         default=0.08,
         help="Normalized joystick deadzone in [0, 1).",
     )
+    parser.add_argument(
+        "--plot",
+        "--plot-waveforms",
+        dest="plot_waveforms",
+        action="store_true",
+        help="Open a live OpenCV telemetry waveform window.",
+    )
+    parser.add_argument(
+        "--plot-window",
+        type=float,
+        default=10.0,
+        help="Initial seconds of telemetry shown; adjustable from 1 to 300 in the window.",
+    )
+    parser.add_argument(
+        "--plot-hz",
+        type=float,
+        default=15.0,
+        help="Waveform display refresh rate; sampling remains at the 50 Hz policy rate.",
+    )
+    parser.add_argument(
+        "--plot-joints",
+        default="",
+        help="Comma-separated joints for actual-position and PD-target plots. "
+        "Empty uses left/right knee, left shoulder roll and left wrist yaw.",
+    )
+    parser.add_argument(
+        "--plot-torque-joints",
+        default="",
+        help="Comma-separated joints for the torque plot. Empty uses all left/right "
+        "hip, knee and ankle joints.",
+    )
+    parser.add_argument(
+        "--plot-save-dir",
+        type=Path,
+        default=SCRIPT_DIR / "waveform_data",
+        help="Directory used by the waveform Save CSV button.",
+    )
     parser.add_argument("--headless", action="store_true")
     args = parser.parse_args()
     if args.gamepad_index < 0:
@@ -1707,6 +2615,20 @@ def parse_args() -> argparse.Namespace:
         parser.error("--gamepad-deadzone must be in [0, 1)")
     if args.gamepad and args.headless:
         parser.error("--gamepad cannot be combined with --headless")
+    if args.plot_waveforms and args.headless:
+        parser.error("--plot cannot be combined with --headless")
+    if not (
+        TelemetryWaveform.MIN_WINDOW_SECONDS
+        <= args.plot_window
+        <= TelemetryWaveform.MAX_WINDOW_SECONDS
+    ):
+        parser.error(
+            "--plot-window must be in "
+            f"[{TelemetryWaveform.MIN_WINDOW_SECONDS:g}, "
+            f"{TelemetryWaveform.MAX_WINDOW_SECONDS:g}]"
+        )
+    if args.plot_hz <= 0.0:
+        parser.error("--plot-hz must be positive")
     direct_mimic = args.policy is not None and args.mode == "mimic"
     if args.mode == "mimic" and args.policy is None:
         parser.error("--mode mimic requires --policy for direct testing")
@@ -1849,6 +2771,7 @@ def main() -> None:
 
     import mujoco.viewer
 
+    waveform = None
     glfw_key_right = 262
     glfw_key_left = 263
     glfw_key_down = 264
@@ -2019,6 +2942,31 @@ def main() -> None:
         with mujoco.viewer.launch_passive(
             simulator.model, simulator.data, key_callback=key_callback
         ) as viewer:
+            if args.plot_waveforms:
+                plot_joints = tuple(
+                    name.strip()
+                    for name in args.plot_joints.split(",")
+                    if name.strip()
+                )
+                plot_torque_joints = tuple(
+                    name.strip()
+                    for name in args.plot_torque_joints.split(",")
+                    if name.strip()
+                )
+                waveform = TelemetryWaveform(
+                    simulator,
+                    window_seconds=args.plot_window,
+                    refresh_hz=args.plot_hz,
+                    joint_names=plot_joints,
+                    torque_joint_names=plot_torque_joints,
+                    save_directory=args.plot_save_dir,
+                )
+                waveform.sample(simulator)
+                print(
+                    "Live waveforms: click Window -/+, Pause or Save CSV; keyboard "
+                    "[-]/[+], Space and S provide the same controls. Esc closes "
+                    "only the waveform window."
+                )
             while viewer.is_running():
                 step_start = time.perf_counter()
                 if gamepad is not None:
@@ -2038,6 +2986,8 @@ def main() -> None:
                         toggle_left_arm()
                         print_status()
                 simulator.control_step()
+                if waveform is not None:
+                    waveform.sample(simulator)
                 viewer.sync()
                 if args.duration > 0.0 and time.perf_counter() - start_time >= args.duration:
                     break
@@ -2045,6 +2995,8 @@ def main() -> None:
                 if sleep_time > 0.0:
                     time.sleep(sleep_time)
     finally:
+        if waveform is not None:
+            waveform.close()
         if gamepad is not None:
             gamepad.close()
 

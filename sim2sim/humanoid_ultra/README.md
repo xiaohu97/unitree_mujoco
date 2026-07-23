@@ -100,6 +100,54 @@ Mimic 使用单帧 144 维观测，stand/walk 使用 10 帧历史。每个策略
 仍可使用 `--mode mimic --policy ... --motion-file ...` 单独启动某个 Mimic，
 用于排查策略本体；这种单策略模式没有 walk 策略可返回。
 
+### 实时数据波形
+
+添加 `--plot` 会在 MuJoCo 以外再打开一个实时波形窗口：
+
+```bash
+python sim2sim/humanoid_ultra/sim2sim.py --gamepad --plot
+```
+
+波形按策略控制频率 `50 Hz` 采样，默认以 `15 Hz` 刷新并显示最近 `10 s`，包括：
+
+- 当前三维策略命令
+- 基座高度和 roll/pitch/yaw
+- 机身坐标系线速度和角速度
+- 所选关节的实际位置和 PD 目标
+- 双腿髋、膝、踝关节的实际执行扭矩
+
+关节位置图中实线是 MuJoCo 实际位置，虚线是发送给 PD 的目标；关节扭矩取自
+MuJoCo `qfrc_actuator`，表示执行器实际施加在对应关节自由度上的广义力矩。
+位置图默认显示左右膝、左肩 roll 和左腕 yaw。扭矩图横跨整个窗口宽度，默认显示
+左右髋 roll/yaw/pitch、膝和踝 pitch/roll 共 12 个腿部关节。可以分别指定位置
+和扭矩关节：
+
+```bash
+python sim2sim/humanoid_ultra/sim2sim.py --gamepad --plot \
+  --plot-window 15 \
+  --plot-hz 10 \
+  --plot-joints left_knee_joint,left_shoulder_roll_joint,left_wrist_yaw_joint \
+  --plot-torque-joints left_hip_pitch_joint,left_knee_joint,left_ankle_pitch_joint
+```
+
+两个关节参数都使用逗号分隔的完整关节名，最多各 16 个。按 `Esc` 或关闭波形
+窗口只停止绘图，MuJoCo 仿真仍会继续；需要键盘控制时再点击 MuJoCo 窗口使其
+获得焦点。
+
+波形窗口顶部提供以下按钮，也可以在波形窗口获得焦点时使用对应快捷键：
+
+```text
+Window - / [ 或 -       缩短显示时间：1/2/5/10/20/30/60/120/300 秒
+Window + / ] 或 +       加长显示时间
+Pause / Space           冻结或恢复波形采样；MuJoCo 和策略仍继续运行
+Save CSV / S            保存当前显示时间窗口内的数据
+```
+
+CSV 默认保存到 `sim2sim/humanoid_ultra/waveform_data/`，包含控制状态、策略名称、
+命令、基座姿态、机身速度、PD 误差、位置图所选关节的位置/目标，以及扭矩图所选
+关节的执行扭矩。使用其他目录时传入 `--plot-save-dir /absolute/output/path`。
+长时间窗口绘图会自动降采样，CSV 仍保留原始 `50 Hz` 数据。
+
 ### 部署 Stand 策略
 
 `USTC-Humanoid-Ultra-27dof-Stand` 的最终策略已经导出到：
