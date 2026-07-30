@@ -91,11 +91,16 @@ walk。程序不再包含 `pick_prepare`、`pick_recover` 或 MuJoCo 专用基�
 站立保持和动作过渡已经包含在两个训练 NPZ 中。
 
 每次策略切换仍保存当前实际关节目标，并用 0.5 秒五次曲线平滑混合到新策略输出。
-混合期间参考保持首帧，完成后才按 50 Hz 推进。Pick 的关节目标变化率限制为
-`4 rad/s`，houtaitui 为 `6 rad/s`。动作结束后使用同样的平滑混合返回 walk。
+混合期间参考保持首帧，完成后才按 50 Hz 推进。Pick 和 houtaitui 的关节目标
+变化率都限制为 `6 rad/s`。动作结束后使用同样的平滑混合返回 walk。
 
-Mimic 使用单帧 144 维观测，stand/walk 使用 10 帧历史。每个策略必须和自身训练
-使用的 NPZ 成对保存，不能交叉替换。
+脚本同时兼容旧版 Mimic 144 维单帧观测和新版 deploy-safe 687 维观测。新版仅对
+IMU 线加速度/角速度、关节位置和关节速度保留 10 帧、约 0.2 s 的 term-major
+历史；参考命令、参考朝向和上次实际应用动作保持当前帧。stand/walk 仍使用原来的
+整帧 10 帧历史。每个策略必须和自身训练使用的 NPZ 成对保存，不能交叉替换。
+这里的 144 维兼容仅指旧策略仍可被部署脚本识别和加载；当前 Mimic 最终统一使用
+`6 rad/s` 的 applied-target 边界，并不复现旧 Pick 的全部训练语义。新版 687 维
+Pick 必须从头训练，不能续训旧 144 维 checkpoint。
 
 仍可使用 `--mode mimic --policy ... --motion-file ...` 单独启动某个 Mimic，
 用于排查策略本体；这种单策略模式没有 walk 策略可返回。
@@ -191,8 +196,9 @@ python sim2sim/humanoid_ultra/sim2sim.py \
 平滑返回；启动时需要关闭轨迹可添加 `--no-left-arm-track`。
 使用其他轨迹文件时传入 `--left-arm-traj /absolute/path/to/traj.csv`。
 
-新版 stand-leftarm 单独使用左肩 roll `+0.10`、右肩 roll `−0.10` 的训练默认值；
-walk 和 Mimic 保留原默认值，策略切换时脚本会同步切换对应的观测/动作零点。
+新版 stand-leftarm 和 687 维 deploy-safe Mimic 使用左肩 roll `+0.10`、右肩 roll
+`−0.10` 的训练默认值；walk 和旧 144 维 Mimic 保留原默认值。策略切换时脚本会
+同步切换对应的观测/动作零点。
 新 CSV 中部分 shoulder/wrist yaw 参考超过部署限位 `±2.5 rad`；MuJoCo 和实机
 都会保留限位裁剪，因此这些区段不会完全达到 CSV 参考角。
 

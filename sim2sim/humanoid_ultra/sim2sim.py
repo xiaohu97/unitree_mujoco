@@ -112,6 +112,7 @@ ISAAC_27DOF_BODIES = (
     "right_wrist_pitch_link",
 )
 MIMIC_ANCHOR_BODY_NAME = "trunk_link"
+MIMIC_PROPRIO_HISTORY_LENGTH = 10
 
 LEFT_ARM_JOINTS = (
     "left_shoulder_pitch_joint",
@@ -217,7 +218,7 @@ DEFAULT_MIMIC_ACTIONS = (
             / "zxh-mimic-pick"
             / "ustc1_pick_stand_transition.npz"
         ),
-        target_speed=4.0,
+        target_speed=6.0,
     ),
     MimicActionSpec(
         name="houtaitui",
@@ -254,6 +255,20 @@ class RobotProfile:
         # 2*dof reference command + 6-D anchor orientation + 3-D base angular
         # velocity + joint position/velocity + previous action.
         return 9 + 5 * self.dof
+
+    @property
+    def mimic_history_observation_dim(self) -> int:
+        # Current reference command/orientation and last applied action, plus
+        # term-major histories of IMU linear/angular motion and joint q/dq.
+        return (
+            6
+            + 3 * self.dof
+            + MIMIC_PROPRIO_HISTORY_LENGTH * (6 + 2 * self.dof)
+        )
+
+    @property
+    def mimic_observation_dims(self) -> tuple[int, int]:
+        return self.mimic_observation_dim, self.mimic_history_observation_dim
 
 
 class GamepadCommandSource:
@@ -691,6 +706,12 @@ class MimicMotion:
         self.frame_index = start_frame
         self.finished = False
         self.anchor_alignment = np.asarray((1.0, 0.0, 0.0, 0.0), dtype=np.float64)
+        self._proprio_history = {
+            "linear_acceleration": deque(maxlen=MIMIC_PROPRIO_HISTORY_LENGTH),
+            "angular_velocity": deque(maxlen=MIMIC_PROPRIO_HISTORY_LENGTH),
+            "joint_position": deque(maxlen=MIMIC_PROPRIO_HISTORY_LENGTH),
+            "joint_velocity": deque(maxlen=MIMIC_PROPRIO_HISTORY_LENGTH),
+        }
 
     @property
     def frame_count(self) -> int:
@@ -717,6 +738,34 @@ class MimicMotion:
         self.frame_index = self.start_frame
         self.finished = False
         self.anchor_alignment[:] = (1.0, 0.0, 0.0, 0.0)
+        for history in self._proprio_history.values():
+            history.clear()
+
+    def update_proprio_history(
+        self,
+        linear_acceleration: np.ndarray,
+        angular_velocity: np.ndarray,
+        joint_position: np.ndarray,
+        joint_velocity: np.ndarray,
+    ) -> np.ndarray:
+        """Return Isaac-compatible term-major history, oldest sample first."""
+        samples = {
+            "linear_acceleration": linear_acceleration,
+            "angular_velocity": angular_velocity,
+            "joint_position": joint_position,
+            "joint_velocity": joint_velocity,
+        }
+        flattened_history = []
+        for name, sample in samples.items():
+            sample = np.asarray(sample, dtype=np.float64)
+            history = self._proprio_history[name]
+            if not history:
+                for _ in range(MIMIC_PROPRIO_HISTORY_LENGTH):
+                    history.append(sample.copy())
+            else:
+                history.append(sample.copy())
+            flattened_history.append(np.concatenate(tuple(history)))
+        return np.concatenate(flattened_history)
 
     def align_anchor_to(self, robot_anchor_quaternion: np.ndarray) -> None:
         """Rotate the reference clip so its first anchor matches the live robot."""
@@ -1956,7 +2005,8 @@ class HumanoidUltraSim2Sim:
             policy = torch.jit.load(str(spec.path), map_location="cpu")
             policy.eval()
             input_dim = policy_input_dim(policy)
-            uses_mimic = input_dim == self.profile.mimic_observation_dim
+            uses_mimic = input_dim in self.profile.mimic_observation_dims
+            uses_mimic_history = input_dim == self.profile.mimic_history_observation_dim
             if uses_mimic:
                 if spec.mode != "mimic":
                     raise RuntimeError(
@@ -1968,7 +2018,7 @@ class HumanoidUltraSim2Sim:
                 if spec.mode == "mimic":
                     raise RuntimeError(
                         f"Policy {spec.name} has input size {input_dim}, but a 27-DOF Mimic "
-                        f"policy must have {self.profile.mimic_observation_dim} inputs."
+                        f"policy must have one of {self.profile.mimic_observation_dims} inputs."
                     )
                 if input_dim % self.HISTORY_LENGTH != 0:
                     raise RuntimeError(
@@ -1986,7 +2036,7 @@ class HumanoidUltraSim2Sim:
                         f"{policy_frame_dim} per frame. Expected "
                         f"{self.profile.observation_dim} for standard stand/locomotion, "
                         f"{self.profile.observation_dim + LEFT_ARM_COMMAND_DIM} for stand-leftarm, "
-                        f"or {self.profile.mimic_observation_dim} total for Mimic."
+                        f"or one of {self.profile.mimic_observation_dims} total for Mimic."
                     )
             with torch.inference_mode():
                 test_output = policy(torch.zeros(1, input_dim, dtype=torch.float32))
@@ -1999,12 +2049,13 @@ class HumanoidUltraSim2Sim:
                     f"got {getattr(test_output, 'shape', type(test_output))}"
                 )
             default_joint_pos = self.profile.default_joint_pos.copy()
-            if uses_left_arm:
+            if uses_left_arm or uses_mimic_history:
                 joint_index = {
                     name: index for index, name in enumerate(self.profile.joint_names)
                 }
-                # The new stand-leftarm run uses the current Isaac asset
-                # defaults; other loaded policies retain their trained defaults.
+                # Stand-leftarm and the new deploy-safe Mimic policy use the
+                # current Isaac asset defaults. Legacy 144-D Mimic policies
+                # retain their original action/observation zero point.
                 default_joint_pos[joint_index["left_shoulder_roll_joint"]] = 0.10
                 default_joint_pos[joint_index["right_shoulder_roll_joint"]] = -0.10
             self.policy_entries.append(
@@ -2014,6 +2065,7 @@ class HumanoidUltraSim2Sim:
                     "policy": policy,
                     "uses_left_arm": uses_left_arm,
                     "uses_mimic": uses_mimic,
+                    "uses_mimic_history": uses_mimic_history,
                     "default_joint_pos": default_joint_pos,
                 }
             )
@@ -2294,16 +2346,34 @@ class HumanoidUltraSim2Sim:
         relative_anchor_rotation_6d = quaternion_to_rotation_matrix(
             relative_anchor_quat
         )[:, :2].reshape(-1)
-        observation = np.concatenate(
-            (
-                motion.command,
-                relative_anchor_rotation_6d,
+        joint_position_relative = joint_pos - self.active_default_joint_pos
+        if self.active_entry["uses_mimic_history"]:
+            body_linear_acceleration = self.data.sensor("BodyAcc").data.copy()
+            proprio_history = motion.update_proprio_history(
+                body_linear_acceleration,
                 body_angular_velocity,
-                joint_pos - self.active_default_joint_pos,
+                joint_position_relative,
                 joint_vel,
-                self.previous_action,
             )
-        )
+            observation = np.concatenate(
+                (
+                    motion.command,
+                    relative_anchor_rotation_6d,
+                    proprio_history,
+                    self.previous_action,
+                )
+            )
+        else:
+            observation = np.concatenate(
+                (
+                    motion.command,
+                    relative_anchor_rotation_6d,
+                    body_angular_velocity,
+                    joint_position_relative,
+                    joint_vel,
+                    self.previous_action,
+                )
+            )
         return np.clip(observation, -100.0, 100.0).astype(np.float32)
 
     def update_policy(self) -> None:
