@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Run Humanoid Ultra Isaac Lab policies in MuJoCo.
 
-Without --policy this loads walk, stand, Pick and houtaitui from the local
-``pt`` directory.  Gamepad X (or keyboard P) switches stand/walk,
-LT+D-pad Right starts Pick, and LT+D-pad Down starts houtaitui.  Every Mimic
-reference advances once per 50 Hz policy step and returns directly to walk
-through the same smooth policy-target blend used by stand/walk.
+Without --policy this loads walk, stand, Pick, houtaitui, Spin and Taitui-Left
+from the local ``pt`` directory.  Gamepad X (or keyboard P) switches
+stand/walk.  LT+D-pad Right/Down/Up/Left starts Pick/houtaitui/Spin/Taitui-Left,
+respectively.  Every Mimic reference advances once per 50 Hz policy step and
+returns directly to walk through the same smooth policy-target blend used by
+stand/walk.
 
 Use ``--mode mimic --policy ... --motion-file ...`` for direct single-policy
 testing.  Gamepad LT+B (or keyboard 0) stops inference and latches kd-only
@@ -194,18 +195,21 @@ class PolicySpec:
     name: str
     mode: str  # "stand", "locomotion", or "mimic" observation semantics.
     path: Path
+    use_current_asset_defaults: bool = False
 
 
 @dataclass(frozen=True)
 class MimicActionSpec:
-    """A named one-shot Mimic policy, reference motion and gamepad trigger."""
+    """A named one-shot Mimic policy, reference motion and input bindings."""
 
     name: str
     trigger: str
     policy_path: Path
     motion_path: Path
+    keyboard_key: str = ""
     start_frame: int = 0
     target_speed: float = 6.0
+    use_current_asset_defaults: bool = False
 
 
 DEFAULT_MIMIC_ACTIONS = (
@@ -218,7 +222,9 @@ DEFAULT_MIMIC_ACTIONS = (
             / "zxh-mimic-pick"
             / "ustc1_pick_stand_transition.npz"
         ),
+        keyboard_key="m",
         target_speed=6.0,
+        use_current_asset_defaults=True,
     ),
     MimicActionSpec(
         name="houtaitui",
@@ -229,7 +235,34 @@ DEFAULT_MIMIC_ACTIONS = (
             / "zxh-mimic-houtaitui"
             / "ustc1_rightstand_stand_transition.npz"
         ),
+        keyboard_key="h",
         target_speed=6.0,
+    ),
+    MimicActionSpec(
+        name="spin",
+        trigger="up",
+        policy_path=POLICY_DIR / "zxh-mimic-spin" / "policy.pt",
+        motion_path=(
+            POLICY_DIR
+            / "zxh-mimic-spin"
+            / "ustc1_spin_stand_transition_hold_2p5s.npz"
+        ),
+        keyboard_key="i",
+        target_speed=6.0,
+        use_current_asset_defaults=True,
+    ),
+    MimicActionSpec(
+        name="taitui_left",
+        trigger="left",
+        policy_path=POLICY_DIR / "zxh-mimic-taitui-left" / "policy.pt",
+        motion_path=(
+            POLICY_DIR
+            / "zxh-mimic-taitui-left"
+            / "ustc_taitui_left_stand_transition.npz"
+        ),
+        keyboard_key="t",
+        target_speed=6.0,
+        use_current_asset_defaults=True,
     ),
 )
 
@@ -280,6 +313,8 @@ class GamepadCommandSource:
     SUPPORTED_MIMIC_TRIGGERS = {
         "right": "CONTROLLER_BUTTON_DPAD_RIGHT",
         "down": "CONTROLLER_BUTTON_DPAD_DOWN",
+        "up": "CONTROLLER_BUTTON_DPAD_UP",
+        "left": "CONTROLLER_BUTTON_DPAD_LEFT",
     }
 
     def __init__(
@@ -1953,10 +1988,23 @@ class HumanoidUltraSim2Sim:
                 raise FileNotFoundError(f"Exported TorchScript policy not found: {spec.path}")
         action_names = [spec.name for spec in mimic_action_specs]
         action_triggers = [spec.trigger for spec in mimic_action_specs if spec.trigger]
+        action_keyboard_keys = [
+            spec.keyboard_key.lower()
+            for spec in mimic_action_specs
+            if spec.keyboard_key
+        ]
         if len(action_names) != len(set(action_names)):
             raise ValueError("Mimic action names must be unique.")
         if len(action_triggers) != len(set(action_triggers)):
             raise ValueError("Mimic action gamepad triggers must be unique.")
+        if any(
+            len(spec.keyboard_key) != 1
+            for spec in mimic_action_specs
+            if spec.keyboard_key
+        ):
+            raise ValueError("Mimic action keyboard keys must be single characters.")
+        if len(action_keyboard_keys) != len(set(action_keyboard_keys)):
+            raise ValueError("Mimic action keyboard keys must be unique.")
         for spec in mimic_action_specs:
             if not spec.motion_path.is_file():
                 raise FileNotFoundError(
@@ -2049,13 +2097,13 @@ class HumanoidUltraSim2Sim:
                     f"got {getattr(test_output, 'shape', type(test_output))}"
                 )
             default_joint_pos = self.profile.default_joint_pos.copy()
-            if uses_left_arm or uses_mimic_history:
+            if uses_left_arm or uses_mimic_history or spec.use_current_asset_defaults:
                 joint_index = {
                     name: index for index, name in enumerate(self.profile.joint_names)
                 }
-                # Stand-leftarm and the new deploy-safe Mimic policy use the
-                # current Isaac asset defaults. Legacy 144-D Mimic policies
-                # retain their original action/observation zero point.
+                # The observation size no longer identifies the zero point:
+                # newly trained Mimic policies are also 144-D. Keep it explicit
+                # so legacy 144-D policies remain reproducible.
                 default_joint_pos[joint_index["left_shoulder_roll_joint"]] = 0.10
                 default_joint_pos[joint_index["right_shoulder_roll_joint"]] = -0.10
             self.policy_entries.append(
@@ -2169,6 +2217,14 @@ class HumanoidUltraSim2Sim:
             action["spec"].trigger: name
             for name, action in self.mimic_actions.items()
             if action["spec"].trigger
+        }
+
+    @property
+    def mimic_keyboard_map(self) -> dict[str, str]:
+        return {
+            action["spec"].keyboard_key.lower(): name
+            for name, action in self.mimic_actions.items()
+            if action["spec"].keyboard_key
         }
 
     def _policy_index(self, mode: str) -> int | None:
@@ -2545,6 +2601,12 @@ def parse_args() -> argparse.Namespace:
         default=6.0,
         help="Joint-target speed limit for direct --mode mimic testing [rad/s].",
     )
+    parser.add_argument(
+        "--mimic-current-asset-defaults",
+        action="store_true",
+        help="Use the current Isaac shoulder-roll action/observation zero point "
+        "for a directly loaded Mimic policy.",
+    )
     parser.add_argument("--vx", type=float, default=0.0, help="Forward velocity command in m/s.")
     parser.add_argument("--vy", type=float, default=0.0, help="Lateral velocity command in m/s.")
     parser.add_argument("--yaw-rate", type=float, default=0.0, help="Yaw velocity command in rad/s.")
@@ -2710,6 +2772,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--mimic-start-frame must be non-negative")
     if args.mimic_policy_target_speed <= 0.0:
         parser.error("--mimic-policy-target-speed must be positive")
+    if args.mimic_current_asset_defaults and not direct_mimic:
+        parser.error("--mimic-current-asset-defaults requires --policy with --mode mimic")
     return args
 
 
@@ -2717,7 +2781,14 @@ def main() -> None:
     args = parse_args()
     if args.policy is not None:
         policy_name = "direct_mimic" if args.mode == "mimic" else args.mode
-        policy_specs = [PolicySpec(policy_name, args.mode, args.policy.resolve())]
+        policy_specs = [
+            PolicySpec(
+                policy_name,
+                args.mode,
+                args.policy.resolve(),
+                use_current_asset_defaults=args.mimic_current_asset_defaults,
+            )
+        ]
         mimic_action_specs = []
         if args.mode == "mimic":
             mimic_action_specs.append(
@@ -2728,6 +2799,7 @@ def main() -> None:
                     motion_path=args.motion_file.resolve(),
                     start_frame=args.mimic_start_frame,
                     target_speed=args.mimic_policy_target_speed,
+                    use_current_asset_defaults=args.mimic_current_asset_defaults,
                 )
             )
     else:
@@ -2741,7 +2813,12 @@ def main() -> None:
         policy_specs = [policies_by_mode[mode] for mode in mode_order]
         mimic_action_specs = list(DEFAULT_MIMIC_ACTIONS)
         policy_specs.extend(
-            PolicySpec(spec.name, "mimic", spec.policy_path.resolve())
+            PolicySpec(
+                spec.name,
+                "mimic",
+                spec.policy_path.resolve(),
+                use_current_asset_defaults=spec.use_current_asset_defaults,
+            )
             for spec in mimic_action_specs
         )
     initial_mode = policy_specs[0].mode
@@ -2818,7 +2895,8 @@ def main() -> None:
             print(
                 f"Mimic {name} ready: {motion.path} "
                 f"({motion.frame_count} frames, {motion.fps:g} Hz, "
-                f"trigger=LT+D-pad {spec.trigger.title()})."
+                f"trigger=LT+D-pad {spec.trigger.title()}/"
+                f"{spec.keyboard_key.upper()})."
             )
 
     start_time = time.perf_counter()
@@ -2912,10 +2990,16 @@ def main() -> None:
         elif simulator.active_mode != "locomotion":
             print("Mimic can only start from walk mode; press P to switch to walk first.")
         else:
-            print(f"Active policy switched to: {simulator.start_mimic(action_name)}")
+            try:
+                state = simulator.start_mimic(action_name)
+            except RuntimeError as exc:
+                print(f"Mimic trigger ignored: {exc}")
+            else:
+                print(f"Active policy switched to: {state}")
 
     def key_callback(keycode: int) -> None:
         handled = True
+        keyboard_key = chr(keycode).lower() if 0 <= keycode < 128 else ""
         if keycode in (ord("R"), ord("r")):
             simulator.reset()
             simulator.stand(args.stand_seconds)
@@ -2923,10 +3007,8 @@ def main() -> None:
             simulator.command[:] = 0.0
         elif keycode in (ord("P"), ord("p")):
             switch_policy()
-        elif keycode in (ord("M"), ord("m")):
-            start_mimic("pick")
-        elif keycode in (ord("H"), ord("h")):
-            start_mimic("houtaitui")
+        elif keyboard_key in simulator.mimic_keyboard_map:
+            start_mimic(simulator.mimic_keyboard_map[keyboard_key])
         elif keycode in (ord("0"),):
             simulator.engage_damping_stop()
         elif simulator.mimic_in_progress and keycode in (
@@ -2988,9 +3070,13 @@ def main() -> None:
         print("Left arm: L toggles trajectory tracking or returns to the default pose.")
     if len(simulator.policy_entries) > 1:
         print("Policy: P switches stand/walk.")
-    if simulator.has_mimic_policy:
+    if simulator.mimic_keyboard_map:
+        keyboard_bindings = ", ".join(
+            f"{key.upper()}={name.replace('_', '-')}"
+            for key, name in simulator.mimic_keyboard_map.items()
+        )
         print(
-            "Mimic: M=pick, H=houtaitui from walk; each returns to walk automatically."
+            f"Mimic: {keyboard_bindings} from walk; each returns to walk automatically."
         )
     print("Other: X/Space stop, 0 damping stop, R reset and restore the default band state.")
     if gamepad is not None:
@@ -3002,10 +3088,12 @@ def main() -> None:
             "Gamepad buttons: Y toggles control; X switches the stand/walk policy; "
             "A toggles the stand-leftarm trajectory."
         )
-        if simulator.has_mimic_policy:
-            print(
-                "Gamepad Mimic: LT+D-pad Right=pick, LT+D-pad Down=houtaitui."
+        if simulator.mimic_trigger_map:
+            gamepad_bindings = ", ".join(
+                f"LT+D-pad {trigger.title()}={name.replace('_', '-')}"
+                for trigger, name in simulator.mimic_trigger_map.items()
             )
+            print(f"Gamepad Mimic: {gamepad_bindings}.")
         print("Gamepad safety: LT+B damping stop; LB+RB clears the command and disables control.")
     print_status()
     try:
