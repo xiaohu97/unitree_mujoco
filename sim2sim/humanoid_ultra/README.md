@@ -69,21 +69,28 @@ pt/
 ├── zxh-mimic-spin/
 │   ├── policy.pt
 │   └── ustc1_spin_stand_transition_hold_2p5s.npz
-└── zxh-mimic-taitui-left/
+├── zxh-mimic-taitui-left/
+│   ├── policy.pt
+│   └── ustc_taitui_left_stand_transition.npz
+└── zxh-mimic-taitui-right/
     ├── policy.pt
-    └── ustc_taitui_left_stand_transition.npz
+    └── ustc_taitui_right_stand_transition.npz
 ```
 
 不传 `--policy` 时默认加载以上六个策略，启动状态固定为 walk：
 
 ```text
 stand <-- X / P --> walk
-                       ├── LT+RIGHT / M --> pick_play --------─┐
+                       ├── LT+RIGHT / M --> pick_play ---------┐
                        ├── LT+DOWN  / H --> houtaitui_play ----┤
                        ├── LT+UP    / I --> spin_play ---------┤
-                       └── LT+LEFT  / T --> taitui_left_play --┤
+                       ├── LT+LEFT  / T --> taitui_left_play --┤
+                       └── RT+RIGHT / Y --> taitui_right_play -┤
                                                              └--> walk
 ```
+
+RT is a second modifier layer, added because the four LT+D-pad slots were
+full.  RT+Down/Up/Left are still free for future actions.
 
 运行：
 
@@ -250,6 +257,7 @@ M                      从 walk 触发一次 Pick
 H                      从 walk 触发一次 houtaitui
 I                      从 walk 触发一次 Spin
 T                      从 walk 触发一次 Taitui-Left
+Y                      从 walk 触发一次 Taitui-Right
 7/8                    缩短/加长弹力带
 9 或 B                  释放/重新连接弹力带
 R                      重置机器人并恢复默认弹力带状态

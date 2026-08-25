@@ -3,7 +3,8 @@
 
 Without --policy this loads walk, stand, Pick, houtaitui, Spin and Taitui-Left
 from the local ``pt`` directory.  Gamepad X (or keyboard P) switches
-stand/walk.  LT+D-pad Right/Down/Up/Left starts Pick/houtaitui/Spin/Taitui-Left,
+stand/walk.  LT+D-pad Right/Down/Up/Left starts Pick/houtaitui/Spin/Taitui-Left
+and RT+D-pad Right starts Taitui-Right,
 respectively.  Every Mimic reference advances once per 50 Hz policy step and
 returns directly to walk through the same smooth policy-target blend used by
 stand/walk.
@@ -237,6 +238,23 @@ DEFAULT_MIMIC_ACTIONS = (
         ),
         keyboard_key="h",
         target_speed=6.0,
+        # The 2026-08-24 policy is a current-defaults 144-D one; the 07-24 v3 it
+        # replaced was a legacy 144-D policy with the old shoulder-roll zero
+        # point, so this flag has to flip with the file.
+        use_current_asset_defaults=True,
+    ),
+    MimicActionSpec(
+        name="taitui_right",
+        trigger="rt_right",  # LT+D-pad was full; RT is the second modifier layer
+        policy_path=POLICY_DIR / "zxh-mimic-taitui-right" / "policy.pt",
+        motion_path=(
+            POLICY_DIR
+            / "zxh-mimic-taitui-right"
+            / "ustc_taitui_right_stand_transition.npz"
+        ),
+        keyboard_key="y",
+        target_speed=6.0,
+        use_current_asset_defaults=True,
     ),
     MimicActionSpec(
         name="spin",
@@ -310,12 +328,24 @@ class GamepadCommandSource:
     AXIS_MAX = 32768.0
     RECONNECT_PERIOD = 1.0
 
+    # (modifier trigger, D-pad button).  The four LT combinations filled up, so
+    # RT is a second layer -- it was otherwise unused.
     SUPPORTED_MIMIC_TRIGGERS = {
-        "right": "CONTROLLER_BUTTON_DPAD_RIGHT",
-        "down": "CONTROLLER_BUTTON_DPAD_DOWN",
-        "up": "CONTROLLER_BUTTON_DPAD_UP",
-        "left": "CONTROLLER_BUTTON_DPAD_LEFT",
+        "right": ("TRIGGERLEFT", "CONTROLLER_BUTTON_DPAD_RIGHT"),
+        "down": ("TRIGGERLEFT", "CONTROLLER_BUTTON_DPAD_DOWN"),
+        "up": ("TRIGGERLEFT", "CONTROLLER_BUTTON_DPAD_UP"),
+        "left": ("TRIGGERLEFT", "CONTROLLER_BUTTON_DPAD_LEFT"),
+        "rt_right": ("TRIGGERRIGHT", "CONTROLLER_BUTTON_DPAD_RIGHT"),
+        "rt_down": ("TRIGGERRIGHT", "CONTROLLER_BUTTON_DPAD_DOWN"),
+        "rt_up": ("TRIGGERRIGHT", "CONTROLLER_BUTTON_DPAD_UP"),
+        "rt_left": ("TRIGGERRIGHT", "CONTROLLER_BUTTON_DPAD_LEFT"),
     }
+
+    @staticmethod
+    def trigger_label(trigger: str) -> str:
+        """Human-readable binding, e.g. 'LT+D-pad Down' or 'RT+D-pad Right'."""
+        modifier, direction = ("RT", trigger[3:]) if trigger.startswith("rt_") else ("LT", trigger)
+        return f"{modifier}+D-pad {direction.title()}"
 
     def __init__(
         self, index: int, deadzone: float, mimic_triggers: dict[str, str]
@@ -462,13 +492,18 @@ class GamepadCommandSource:
                 self._controller.get_axis(self._pygame.CONTROLLER_AXIS_TRIGGERLEFT)
                 > 0.5 * self.AXIS_MAX
             )
+            rt_pressed = bool(
+                self._controller.get_axis(self._pygame.CONTROLLER_AXIS_TRIGGERRIGHT)
+                > 0.5 * self.AXIS_MAX
+            )
+            modifier_pressed = {"TRIGGERLEFT": lt_pressed, "TRIGGERRIGHT": rt_pressed}
             mimic_pressed = {}
-            for trigger, button_name in self.SUPPORTED_MIMIC_TRIGGERS.items():
+            for trigger, (modifier, button_name) in self.SUPPORTED_MIMIC_TRIGGERS.items():
                 if trigger not in self.mimic_triggers:
                     continue
                 button = getattr(self._pygame, button_name)
                 mimic_pressed[trigger] = bool(
-                    lt_pressed and self._controller.get_button(button)
+                    modifier_pressed[modifier] and self._controller.get_button(button)
                 )
             stop_pressed = bool(
                 self._controller.get_button(self._pygame.CONTROLLER_BUTTON_LEFTSHOULDER)
@@ -1970,10 +2005,18 @@ class HumanoidUltraSim2Sim:
         band_stiffness: float,
         band_damping: float,
         band_support_ratio: float,
+        scene_path: Path | None = None,
     ):
         self.profile = make_profile(dof)
         repository_root = Path(__file__).resolve().parents[2]
-        model_path = (
+        # The default scene was generated from the nominal CAD URDF.  Training
+        # uses the system-identified one, and the payload tasks use an
+        # identified model with the left-hand load; both totals land within
+        # 0.04 kg of nominal but the per-link masses differ by 3.1 kg in
+        # aggregate, so evaluating a payload policy on the default scene is a
+        # different robot.  scene_27dof_identified.xml and
+        # scene_27dof_identified_leftarm2p5kg.xml carry those inertials.
+        model_path = Path(scene_path) if scene_path is not None else (
             repository_root
             / "unitree_robots"
             / "humanoid_ultra"
@@ -2739,6 +2782,14 @@ def parse_args() -> argparse.Namespace:
         default=SCRIPT_DIR / "waveform_data",
         help="Directory used by the waveform Save CSV button.",
     )
+    parser.add_argument(
+        "--scene",
+        type=Path,
+        default=None,
+        help="MuJoCo scene XML overriding the default scene_<dof>dof.xml. Use "
+        "scene_27dof_identified.xml to match the training plant, or "
+        "scene_27dof_identified_leftarm2p5kg.xml for the 2.5 kg payload tasks.",
+    )
     parser.add_argument("--headless", action="store_true")
     args = parser.parse_args()
     if args.gamepad_index < 0:
@@ -2854,6 +2905,7 @@ def main() -> None:
         band_stiffness=args.band_stiffness,
         band_damping=args.band_damping,
         band_support_ratio=args.band_support_ratio,
+        scene_path=args.scene,
     )
     simulator.stand(args.stand_seconds)
     gamepad = (
@@ -2895,7 +2947,7 @@ def main() -> None:
             print(
                 f"Mimic {name} ready: {motion.path} "
                 f"({motion.frame_count} frames, {motion.fps:g} Hz, "
-                f"trigger=LT+D-pad {spec.trigger.title()}/"
+                f"trigger={GamepadCommandSource.trigger_label(spec.trigger)}/"
                 f"{spec.keyboard_key.upper()})."
             )
 
@@ -3090,7 +3142,7 @@ def main() -> None:
         )
         if simulator.mimic_trigger_map:
             gamepad_bindings = ", ".join(
-                f"LT+D-pad {trigger.title()}={name.replace('_', '-')}"
+                f"{GamepadCommandSource.trigger_label(trigger)}={name.replace('_', '-')}"
                 for trigger, name in simulator.mimic_trigger_map.items()
             )
             print(f"Gamepad Mimic: {gamepad_bindings}.")
