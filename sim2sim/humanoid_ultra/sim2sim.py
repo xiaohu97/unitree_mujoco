@@ -2006,8 +2006,20 @@ class HumanoidUltraSim2Sim:
         band_damping: float,
         band_support_ratio: float,
         scene_path: Path | None = None,
+        mimic_ankle_roll_limit: float | None = None,
     ):
         self.profile = make_profile(dof)
+        # Tight-roll Mimic policies were trained with a narrower *action
+        # target* clip.  Keep it separate from the MuJoCo mechanical joint
+        # range: training did not reduce the physical ankle-roll range.
+        self.target_position_limits = self.profile.position_limits.copy()
+        if mimic_ankle_roll_limit is not None:
+            for joint_name in ("left_ankle_roll_joint", "right_ankle_roll_joint"):
+                joint_index = self.profile.joint_names.index(joint_name)
+                self.target_position_limits[joint_index] = (
+                    -mimic_ankle_roll_limit,
+                    mimic_ankle_roll_limit,
+                )
         repository_root = Path(__file__).resolve().parents[2]
         # The default scene was generated from the nominal CAD URDF.  Training
         # uses the system-identified one, and the payload tasks use an
@@ -2316,15 +2328,15 @@ class HumanoidUltraSim2Sim:
         """Apply joint limits and a per-control-step joint-target speed limit."""
         target = np.clip(
             np.asarray(target, dtype=np.float64),
-            self.profile.position_limits[:, 0],
-            self.profile.position_limits[:, 1],
+            self.target_position_limits[:, 0],
+            self.target_position_limits[:, 1],
         )
         max_step = speed_limit * self.SIM_DT * self.CONTROL_DECIMATION
         target_delta = np.clip(target - self.target_joint_pos, -max_step, max_step)
         self.target_joint_pos = np.clip(
             self.target_joint_pos + target_delta,
-            self.profile.position_limits[:, 0],
-            self.profile.position_limits[:, 1],
+            self.target_position_limits[:, 0],
+            self.target_position_limits[:, 1],
         )
         self.previous_action = np.clip(
             (self.target_joint_pos - self.active_default_joint_pos) / self.ACTION_SCALE,
@@ -2496,8 +2508,8 @@ class HumanoidUltraSim2Sim:
         requested_action = np.clip(action, -100.0, 100.0).astype(np.float64)
         requested_target = np.clip(
             self.active_default_joint_pos + self.ACTION_SCALE * requested_action,
-            self.profile.position_limits[:, 0],
-            self.profile.position_limits[:, 1],
+            self.target_position_limits[:, 0],
+            self.target_position_limits[:, 1],
         )
         current_target = self.target_joint_pos.copy()
         if self.policy_transition_start is not None:
@@ -2643,6 +2655,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=6.0,
         help="Joint-target speed limit for direct --mode mimic testing [rad/s].",
+    )
+    parser.add_argument(
+        "--mimic-ankle-roll-limit",
+        type=float,
+        default=None,
+        metavar="RAD",
+        help="Symmetric left/right ankle-roll position limit for direct Mimic "
+        "testing [rad]. Use 0.20 for the houtaitui tight-roll policy.",
     )
     parser.add_argument(
         "--mimic-current-asset-defaults",
@@ -2823,6 +2843,16 @@ def parse_args() -> argparse.Namespace:
         parser.error("--mimic-start-frame must be non-negative")
     if args.mimic_policy_target_speed <= 0.0:
         parser.error("--mimic-policy-target-speed must be positive")
+    if args.mimic_ankle_roll_limit is not None:
+        default_limit = DEPLOYMENT_POSITION_LIMITS["left_ankle_roll_joint"][1]
+        if not 0.0 < args.mimic_ankle_roll_limit <= default_limit:
+            parser.error(
+                f"--mimic-ankle-roll-limit must be in (0, {default_limit:g}]"
+            )
+        if not direct_mimic:
+            parser.error(
+                "--mimic-ankle-roll-limit requires --policy with --mode mimic"
+            )
     if args.mimic_current_asset_defaults and not direct_mimic:
         parser.error("--mimic-current-asset-defaults requires --policy with --mode mimic")
     return args
@@ -2906,6 +2936,7 @@ def main() -> None:
         band_damping=args.band_damping,
         band_support_ratio=args.band_support_ratio,
         scene_path=args.scene,
+        mimic_ankle_roll_limit=args.mimic_ankle_roll_limit,
     )
     simulator.stand(args.stand_seconds)
     gamepad = (
