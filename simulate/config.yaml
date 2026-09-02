@@ -1,10 +1,14 @@
-robot: "g1"  # Robot name, "go2", "b2", "b2w", "h1", "go2w", "g1"
-# robot_scene: "scene_29dof.xml" # Robot scene, /unitree_robots/[robot]/scene.xml 
+# 以下所有项都可被命令行覆盖（新版 param.h 提供）：
+#   ./unitree_mujoco -r g1 -s scene_29dof.xml -i 0 -n lo
+robot: "g1"  # Robot name, "go2", "b2", "b2w", "h1", "go2w", "g1", "humanoid_ultra"
 
-robot_scene: "scene_g1_29dof_terrain.xml" 
+# 相对路径会被解析为 /unitree_robots/[robot]/[robot_scene]；也可写绝对路径
+robot_scene: "scene_g1_29dof_terrain.xml"
+# robot_scene: "scene_29dof.xml"
+# robot_scene: "/home/ustczxh/humanoid/unitree_mujoco/data/varied_scenes/var_0025/scene_varied.xml"
 
-domain_id: 0  # Domain id  g1 0  go2 1
-interface: "lo" # Interface "lo" 表示使用本地回环接口（localhost），适合仿真环境。
+domain_id: 0  # Domain id   g1 用 0，go2 用 1
+interface: "lo" # "lo" 表示本地回环接口（localhost），适合仿真
 
 use_joystick: 1 # 启用游戏手柄模拟 Unitree 的无线控制器
 joystick_type: "xbox" # support "xbox" and "switch" gamepad layout
@@ -13,4 +17,4 @@ joystick_bits: 16 # Some game controllers may only have 8-bit accuracy
 
 print_scene_information: 1 # Print link, joint and sensors information of robot
 
-enable_elastic_band: 1 # Virtual spring band, used for lifting h1 模拟 H1 机器人初始化时的悬挂过程
+enable_elastic_band: 1 # 虚拟弹力带，用于吊起 h1/g1（键盘 7/8 调长度，9 开关）

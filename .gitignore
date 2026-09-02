@@ -4,5 +4,14 @@
 **/log/
 **/install/
 
-# Generated system-identification datasets
+# 外部依赖源码（按 readme 自行放置，不入库）
+simulate/mujoco
+unitree_robots/unitree_sdk2/
+
+# 采集/生成的数据集（太大，不上传）
+# 注意：只按目录忽略，不用全局 *.csv / *.dat，
+# 否则 sim2sim/humanoid_ultra/waveform_data/ 下已跟踪的波形会被误伤
 /identification_data/
+/data/
+tools/data/
+**/varied_scenes/

@@ -3,9 +3,12 @@ import numpy as np
 import cv2
 import noise
 
-ROBOT = "g1"
-INPUT_SCENE_PATH = "./scene_29dof.xml"
-OUTPUT_SCENE_PATH = "../unitree_robots/" + ROBOT + "/scene_g1_29dof_terrain.xml"
+# 默认值（保持上游行为），可用命令行覆盖：
+#   python terrain_generator.py --robot g1 --input ./scene_29dof.xml \
+#                               --output ../unitree_robots/g1/scene_g1_29dof_terrain.xml
+ROBOT = "go2"
+INPUT_SCENE_PATH = "./scene.xml"
+OUTPUT_SCENE_PATH = "../unitree_robots/" + ROBOT + "/scene_terrain.xml"
 
 
 # zyx euler angle to quaternion
@@ -258,6 +261,21 @@ class TerrainGenerator:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Generate a MuJoCo terrain scene")
+    parser.add_argument("--robot", default=ROBOT,
+                        help='robot name under unitree_robots/, e.g. "go2" / "g1"')
+    parser.add_argument("--input", default=None,
+                        help="input scene xml (default ./scene.xml)")
+    parser.add_argument("--output", default=None,
+                        help="output scene xml (default ../unitree_robots/<robot>/scene_terrain.xml)")
+    args = parser.parse_args()
+
+    ROBOT = args.robot
+    INPUT_SCENE_PATH = args.input or INPUT_SCENE_PATH
+    OUTPUT_SCENE_PATH = args.output or ("../unitree_robots/" + ROBOT + "/scene_terrain.xml")
+
     tg = TerrainGenerator()
 
     # Box obstacle
