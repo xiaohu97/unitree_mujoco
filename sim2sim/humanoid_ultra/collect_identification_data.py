@@ -317,7 +317,7 @@ class IdentificationRecorder:
 
     def recompute_ddq_savgol(self, window: int = 31, polyorder: int = 2) -> None:
         """把关节 ddq 和 base 角加速度改成对 dq 做 Savitzky-Golay 滤波微分，
-        与实机采集管线 (collect_identification_forceee_data.py, savgol window=31) 一致。
+        与实机采集管线 (tools/collect_g1_dds_data_with_force.py, savgol window=31) 一致。
         mujoco 原始 qacc 满带宽、含落地冲击尖峰(可达 1716 rad/s²)，会破坏惯量辨识；
         savgol 限带后腿部辨识显著变准(sim 验证: Σ|Δmass| 8.2→2.5, RMSE 7.7→2.4)。
         base 线加速度仍保留 IMU 读数(实机也用 IMU 加速度计)。

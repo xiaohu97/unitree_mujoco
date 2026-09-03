@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 """
-G1机器人惯性参数辨识数据采集（含末端接触力）
-==============================================
-基于 collect_identification_data.py 扩展：
-- 临时旧字段布局下，将脚底六维力写入 g1_robot_ee_force.dat
+G1机器人惯性参数辨识数据采集一体化脚本
+=========================================
+合并了以下功能:
+1. read_sim_g1_data_logger.py - DDS数据采集
+2. low_ddq_contact_tick.py - 加速度计算和接触状态更新
+3. sim2csv2dat.py - CSV转DAT格式
+
+数据来源：DDS 被动监听 rt/lowstate + rt/sportmodestate，本脚本不发任何指令，
+需要另有程序在驱动机器人（C++ 仿真器或 G1 真机均可）。ddq 由 dq 数值微分得到。
+直接读 MuJoCo 真值、自带激励轨迹的 Humanoid Ultra 版本见
+sim2sim/humanoid_ultra/collect_identification_data.py。
 
 使用方法:
-    python collect_identification_forceee_data.py <output_dir> [--duration 30] [--domain-id 0] [--dof-mode 12dof|29dof|27dof]
+    python collect_g1_dds_data.py <output_dir> [--duration 30] [--domain-id 0]
+
+示例:
+    python collect_g1_dds_data.py ./data/varied_scenes/var_0000 --duration 30
+
+作者: ustczxh
+日期: 2026-01-30
 """
 
+import os
 import sys
 import time
 import csv
+import signal
 import argparse
 import numpy as np
 import pandas as pd
@@ -30,84 +45,44 @@ except ImportError:
     sys.exit(1)
 
 
-DOF_MODE_PRESETS = {
-    "12dof": {"motor_count": 12, "dat_motors": 12},
-    "29dof": {"motor_count": 29, "dat_motors": 29},
-    "27dof": {"motor_count": 27, "dat_motors": 27},
-}
-
-
-def normalize_dof_mode(dof_mode: str):
-    aliases = {
-        "12": "12dof",
-        "12dof": "12dof",
-        "12-dof": "12dof",
-        "29": "29dof",
-        "29dof": "29dof",
-        "29-dof": "29dof",
-        "27": "27dof",
-        "27dof": "27dof",
-        "27-dof": "27dof",
-    }
-    normalized = aliases.get(dof_mode.lower())
-    if normalized is None:
-        supported = ", ".join(sorted(DOF_MODE_PRESETS.keys()))
-        raise ValueError(f"未知 dof 模式: {dof_mode}. 支持: {supported}")
-    return normalized
-
-
-def resolve_motor_settings(dof_mode=None, motor_count=None, dat_motors=None):
-    if dof_mode is None:
-        resolved_motor_count = 35 if motor_count is None else motor_count
-        resolved_dat_motors = 12 if dat_motors is None else dat_motors
-        return None, resolved_motor_count, resolved_dat_motors
-
-    normalized_mode = normalize_dof_mode(dof_mode)
-    preset = DOF_MODE_PRESETS[normalized_mode]
-    resolved_motor_count = preset["motor_count"] if motor_count is None else motor_count
-    resolved_dat_motors = preset["dat_motors"] if dat_motors is None else dat_motors
-    return normalized_mode, resolved_motor_count, resolved_dat_motors
-
-
-class G1ForceEEDataCollector:
-    """G1机器人数据采集器（含末端接触力）"""
-
-    def __init__(self, output_dir: str, duration: float = 30.0,
+class G1DataCollector:
+    """G1机器人数据采集器"""
+    
+    def __init__(self, output_dir: str, duration: float = 30.0, 
                  domain_id: int = 0, interface: str = "lo",
-                 motor_count: int = 35, dat_motors: int = 12):
+                 motor_count: int = 35):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
+        
         self.duration = duration
         self.domain_id = domain_id
         self.interface = interface
         self.motor_count = motor_count
-        self.dat_motors = dat_motors
-
+        
         # 数据缓存
         self.odom_data = None
         self.low_data = None
-
+        
         # CSV文件
         self.csv_file = None
         self.csv_writer = None
         self.csv_path = None
-
+        
         # 控制标志
         self.running = False
         self.start_time = None
-
+        
     def _get_csv_columns(self):
         """获取CSV列名"""
         columns = [
             'timestamp',
             'odom_stamp_sec', 'odom_stamp_nanosec',
             'odom_mode',
-            'odom_imu_quaternion_w', 'odom_imu_quaternion_x',
+            'odom_imu_quaternion_w', 'odom_imu_quaternion_x', 
             'odom_imu_quaternion_y', 'odom_imu_quaternion_z',
-            'odom_imu_angular_velocity_x', 'odom_imu_angular_velocity_y',
+            'odom_imu_angular_velocity_x', 'odom_imu_angular_velocity_y', 
             'odom_imu_angular_velocity_z',
-            'odom_imu_linear_acceleration_x', 'odom_imu_linear_acceleration_y',
+            'odom_imu_linear_acceleration_x', 'odom_imu_linear_acceleration_y', 
             'odom_imu_linear_acceleration_z',
             'odom_imu_temperature',
             'odom_gait_type',
@@ -118,13 +93,13 @@ class G1ForceEEDataCollector:
             'odom_yaw_speed',
             'odom_velocity_x', 'odom_velocity_y', 'odom_velocity_z',
             'odom_angular_speed',
-            'odom_foot_position_1', 'odom_foot_position_2',
+            'odom_foot_position_1', 'odom_foot_position_2', 
             'odom_foot_position_3', 'odom_foot_position_4',
-            'odom_foot_contact_1', 'odom_foot_contact_2',
+            'odom_foot_contact_1', 'odom_foot_contact_2', 
             'odom_foot_contact_3', 'odom_foot_contact_4',
-            'odom_foot_force_1', 'odom_foot_force_2', 'odom_foot_force_3',
+            'odom_foot_force_1', 'odom_foot_force_2', 'odom_foot_force_3', 
             'odom_foot_force_4', 'odom_foot_force_5', 'odom_foot_force_6',
-            'odom_foot_force_7', 'odom_foot_force_8', 'odom_foot_force_9',
+            'odom_foot_force_7', 'odom_foot_force_8', 'odom_foot_force_9', 
             'odom_foot_force_10', 'odom_foot_force_11', 'odom_foot_force_12',
             'odom_foot_position_x1', 'odom_foot_position_y1', 'odom_foot_position_z1',
             'odom_foot_position_x2', 'odom_foot_position_y2', 'odom_foot_position_z2',
@@ -135,15 +110,15 @@ class G1ForceEEDataCollector:
         for i in range(10):
             for field in ['x', 'y', 'yaw', 'vx', 'vy', 'time']:
                 columns.append(f'odom_path_point_{i+1}_{field}')
-
+        
         # Low state
         columns += ['low_tick', 'low_version_0', 'low_version_1',
-                    'low_mode_pr', 'low_mode_machine',
-                    'low_imu_quat_w', 'low_imu_quat_x', 'low_imu_quat_y', 'low_imu_quat_z',
-                    'low_imu_gyro_x', 'low_imu_gyro_y', 'low_imu_gyro_z',
-                    'low_imu_accel_x', 'low_imu_accel_y', 'low_imu_accel_z',
-                    'low_imu_roll', 'low_imu_pitch', 'low_imu_yaw', 'low_imu_temperature']
-
+                   'low_mode_pr', 'low_mode_machine',
+                   'low_imu_quat_w', 'low_imu_quat_x', 'low_imu_quat_y', 'low_imu_quat_z',
+                   'low_imu_gyro_x', 'low_imu_gyro_y', 'low_imu_gyro_z',
+                   'low_imu_accel_x', 'low_imu_accel_y', 'low_imu_accel_z',
+                   'low_imu_roll', 'low_imu_pitch', 'low_imu_yaw', 'low_imu_temperature']
+        
         # Motor states
         for i in range(self.motor_count):
             columns += [
@@ -153,13 +128,13 @@ class G1ForceEEDataCollector:
                 f'low_motor_{i}_sensor_0', f'low_motor_{i}_sensor_1',
                 f'low_motor_{i}_vol', f'low_motor_{i}_motorstate'
             ] + [f'low_motor_{i}_reserve_{j}' for j in range(4)]
-
+        
         columns += [f'low_wireless_remote_{i}' for i in range(40)]
         columns += [f'low_reserve_{i}' for i in range(4)]
         columns += ['low_crc']
-
+        
         return columns
-
+    
     def _open_csv(self):
         """打开CSV文件"""
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -168,7 +143,7 @@ class G1ForceEEDataCollector:
         self.csv_writer = csv.writer(self.csv_file)
         self.csv_writer.writerow(self._get_csv_columns())
         print(f"CSV文件: {self.csv_path}")
-
+    
     def _odom_callback(self, msg):
         """SportModeState回调"""
         try:
@@ -186,7 +161,7 @@ class G1ForceEEDataCollector:
             odom_row = [
                 sec, nanosec,
                 msg.mode,
-                msg.imu_state.quaternion[0], msg.imu_state.quaternion[1],
+                msg.imu_state.quaternion[0], msg.imu_state.quaternion[1], 
                 msg.imu_state.quaternion[2], msg.imu_state.quaternion[3],
                 msg.imu_state.gyroscope[0], msg.imu_state.gyroscope[1], msg.imu_state.gyroscope[2],
                 msg.imu_state.accelerometer[0], msg.imu_state.accelerometer[1], msg.imu_state.accelerometer[2],
@@ -211,16 +186,16 @@ class G1ForceEEDataCollector:
             for i in range(10):
                 odom_row.extend([
                     msg.path_point[i].x, msg.path_point[i].y,
-                    msg.path_point[i].yaw, msg.path_point[i].vx,
+                    msg.path_point[i].yaw, msg.path_point[i].vx, 
                     msg.path_point[i].vy, msg.path_point[i].t_from_start
                 ])
-
+            
             self.odom_data = odom_row
             self._write_row()
         except Exception as e:
             if self.running:  # 只在运行时报错
                 print(f"Odom回调错误: {e}")
-
+    
     def _low_callback(self, msg):
         """LowState回调"""
         try:
@@ -236,7 +211,7 @@ class G1ForceEEDataCollector:
                 imu.rpy[0], imu.rpy[1], imu.rpy[2],
                 imu.temperature
             ]
-
+            
             for motor in msg.motor_state[:self.motor_count]:
                 low_row += [
                     motor.mode, motor.q, motor.dq, motor.ddq, motor.tau_est,
@@ -244,43 +219,43 @@ class G1ForceEEDataCollector:
                     motor.sensor[0], motor.sensor[1],
                     motor.vol, motor.motorstate
                 ] + list(motor.reserve)
-
+            
             # 填充不足的电机
             for _ in range(self.motor_count - len(msg.motor_state)):
                 low_row += [0] * 15
-
+            
             low_row += list(msg.wireless_remote)
             low_row += list(msg.reserve)
             low_row += [msg.crc]
-
+            
             self.low_data = low_row
             self._write_row()
         except Exception as e:
             if self.running:  # 只在运行时报错
                 print(f"Low回调错误: {e}")
-
+    
     def _write_row(self):
         """写入一行数据"""
         if not self.running or self.csv_writer is None or self.csv_file is None:
             return
-
+        
         try:
             current_time = time.time()
             odom_len = 2 + 1 + 4 + 3 + 3 + 1 + 1 + 1 + 1 + 1 + 3 + 1 + 3 + 1 + 4 + 4 + 12 + 12 + 10 * 6
             low_len = 1 + 2 + 2 + 4 + 3 + 3 + 4 + self.motor_count * 15 + 40 + 4 + 1
-
+            
             odom_row = self.odom_data if self.odom_data else [0] * odom_len
             low_row = self.low_data if self.low_data else [0] * low_len
-
+            
             row = [current_time] + odom_row + low_row
             self.csv_writer.writerow(row)
-
+            
             # 定期刷新
             if int(current_time * 1000) % 100 == 0:
                 self.csv_file.flush()
         except Exception:
             pass  # 忽略写入错误（可能文件已关闭）
-
+    
     def collect(self):
         """执行数据采集"""
         print(f"\n{'='*60}")
@@ -290,32 +265,30 @@ class G1ForceEEDataCollector:
         print(f"采集时长: {self.duration} 秒")
         print(f"Domain ID: {self.domain_id}")
         print(f"网络接口: {self.interface}")
-        print(f"采集电机数: {self.motor_count}")
-        print(f"导出DAT电机数: {self.dat_motors}")
         print()
-
+        
         self._open_csv()
         self.running = True
         self.start_time = time.time()
-
+        
         # 初始化DDS
         ChannelFactoryInitialize(id=self.domain_id, networkInterface=self.interface)
-
+        
         odom_sub = ChannelSubscriber("rt/sportmodestate", SportModeState_)
         low_sub = ChannelSubscriber("rt/lowstate", LowState_)
-
+        
         odom_sub.Init(self._odom_callback, 10)
         low_sub.Init(self._low_callback, 10)
-
+        
         print(f"正在采集数据... (按Ctrl+C提前结束)")
-
+        
         try:
             while self.running:
                 elapsed = time.time() - self.start_time
                 if elapsed >= self.duration:
                     print(f"\n采集完成 ({self.duration}秒)")
                     break
-
+                
                 # 显示进度
                 remaining = self.duration - elapsed
                 print(f"\r剩余时间: {remaining:.1f}秒", end='', flush=True)
@@ -326,7 +299,7 @@ class G1ForceEEDataCollector:
             # 先停止采集，等待回调结束
             self.running = False
             time.sleep(0.1)  # 给回调一点时间完成
-
+            
             # 然后关闭文件
             if self.csv_file:
                 try:
@@ -336,91 +309,84 @@ class G1ForceEEDataCollector:
                     pass
                 self.csv_file = None
                 self.csv_writer = None
-
+        
         return self.csv_path
-
+    
     def process_csv(self, csv_path: Path) -> Path:
         """处理CSV：计算加速度和接触状态"""
         print(f"\n{'='*60}")
         print(f"处理CSV数据")
         print(f"{'='*60}")
-
+        
         print(f"读取: {csv_path}")
         df = pd.read_csv(csv_path)
-
+        
         # 清洗数据
         timestamp_col = 'low_tick'
         if timestamp_col not in df.columns:
             print(f"警告: 缺少 {timestamp_col} 列")
             return csv_path
-
+        
         raw_ticks = df[timestamp_col].values
-
+        
         # 首行异常处理
         if len(df) > 1 and raw_ticks[0] == 0 and raw_ticks[1] > 1000:
             print(f"剔除首行异常跳变")
             df = df.iloc[1:].reset_index(drop=True)
-
+        
         # 去重
         before = len(df)
         df = df.drop_duplicates(subset=timestamp_col, keep='first').reset_index(drop=True)
         after = len(df)
         if before - after > 0:
             print(f"剔除 {before - after} 行重复数据")
-
+        
         # 时间转换
         time_scale = 1000.0
         time_values = df[timestamp_col].values / time_scale
         if np.any(np.diff(time_values) == 0):
             time_values = time_values + np.arange(len(time_values)) * 1e-9
-
+        
         # 分段
         dt_array = np.diff(time_values, prepend=time_values[0])
         GAP_THRESHOLD = 0.5
         segment_ids = (dt_array > GAP_THRESHOLD).cumsum()
         df['segment_id'] = segment_ids
-
+        
         num_segments = segment_ids[-1] + 1
         print(f"检测到 {num_segments} 个数据片段")
-
+        
         # 处理每个片段
         print("计算加速度...")
         df = df.groupby('segment_id', group_keys=False).apply(
             lambda seg: self._process_segment(seg, timestamp_col, time_scale)
         )
-
-        # 备份 detectFootContacts(0.5) 的原始接触状态到 odom_foot_contact_3/4
-        print("备份sim接触状态到 odom_foot_contact_3/4...")
-        if 'odom_foot_contact_1' in df.columns:
-            df['odom_foot_contact_3'] = df['odom_foot_contact_1'].copy()
-        if 'odom_foot_contact_2' in df.columns:
-            df['odom_foot_contact_4'] = df['odom_foot_contact_2'].copy()
-
-        # 更新接触状态（用tau估计覆盖odom_foot_contact_1/2）
-        print("更新接触状态（tau估计）...")
+        
+        # 更新接触状态
+        print("更新接触状态...")
         if 'low_motor_3_tau_est' in df.columns:
             df['odom_foot_contact_1'] = np.where(
                 df['low_motor_3_tau_est'] <= -0.5, 1,
                 np.where(df['low_motor_3_tau_est'] > -0.5, 2, 0)
             ).astype(int)
-
+        
         if 'low_motor_9_tau_est' in df.columns:
             df['odom_foot_contact_2'] = np.where(
                 df['low_motor_9_tau_est'] <= -0.5, 1,
                 np.where(df['low_motor_9_tau_est'] > -0.5, 2, 0)
             ).astype(int)
-
+        
         # 删除辅助列
         if 'segment_id' in df.columns:
             del df['segment_id']
-
+        
         # 保存处理后的CSV
         processed_path = csv_path.parent / csv_path.name.replace('.csv', '_processed.csv')
         df.to_csv(processed_path, index=False, float_format='%.6f')
         print(f"保存: {processed_path}")
-
+        
         return processed_path
-
+    
     def _process_segment(self, df_seg, timestamp_col, time_scale):
         """处理单个数据片段"""
         if len(df_seg) < 32:
@@ -429,133 +395,122 @@ class G1ForceEEDataCollector:
             for axis in ['x', 'y', 'z']:
                 df_seg[f'body_ang_acceleration_{axis}'] = 0.0
             return df_seg
-
+        
         t_seg = df_seg[timestamp_col].values / time_scale
         if np.any(np.diff(t_seg) <= 0):
             t_seg = t_seg + np.arange(len(t_seg)) * 1e-9
-
+        
         t_start, t_end = t_seg[0], t_seg[-1]
         fs = 1000.0
         dt_uniform = 1.0 / fs
         t_uniform = np.arange(t_start, t_end, dt_uniform)
-
+        
         def compute_col(col_name, res_col_name):
             if col_name not in df_seg.columns:
                 df_seg[res_col_name] = 0.0
                 return
-
+            
             vals_orig = df_seg[col_name].values
             if np.isnan(vals_orig).any():
                 vals_orig = pd.Series(vals_orig).fillna(method='ffill').fillna(method='bfill').values
-
+            
             try:
                 f_interp = interp1d(t_seg, vals_orig, kind='linear', fill_value="extrapolate")
                 vals_uniform = f_interp(t_uniform)
-                acc_uniform = savgol_filter(vals_uniform, window_length=31, polyorder=2,
+                acc_uniform = savgol_filter(vals_uniform, window_length=31, polyorder=2, 
                                            deriv=1, delta=dt_uniform)
                 f_acc = interp1d(t_uniform, acc_uniform, kind='linear', fill_value="extrapolate")
                 df_seg[res_col_name] = f_acc(t_seg)
             except Exception:
                 df_seg[res_col_name] = 0.0
-
+        
         # 计算电机加速度
         for i in range(self.motor_count):
             compute_col(f'low_motor_{i}_dq', f'low_motor_{i}_ddq')
-
+        
         # 计算角加速度
         for axis in ['x', 'y', 'z']:
             compute_col(f'low_imu_gyro_{axis}', f'body_ang_acceleration_{axis}')
-
+        
         return df_seg
-
+    
     def csv_to_dat(self, csv_path: Path, num_motors: int = 12):
         """将CSV转换为DAT格式"""
         print(f"\n{'='*60}")
         print(f"转换为DAT格式")
         print(f"{'='*60}")
-
+        
         print(f"读取: {csv_path}")
         df = pd.read_csv(csv_path)
-
+        
         # 定义数据集
         datasets = {
             'g1_robot_low_q.dat': [
                 'odom_position_x', 'odom_position_y', 'odom_position_z',
                 'low_imu_quat_x', 'low_imu_quat_y', 'low_imu_quat_z', 'low_imu_quat_w'
             ] + [f'low_motor_{i}_q' for i in range(num_motors)],
-
+            
             'g1_robot_odom_q.dat': [
                 'odom_position_x', 'odom_position_y', 'odom_position_z',
-                'odom_imu_quaternion_x', 'odom_imu_quaternion_y',
+                'odom_imu_quaternion_x', 'odom_imu_quaternion_y', 
                 'odom_imu_quaternion_z', 'odom_imu_quaternion_w'
             ] + [f'low_motor_{i}_q' for i in range(num_motors)],
-
+            
             'g1_robot_dq.dat': [
                 'odom_velocity_x', 'odom_velocity_y', 'odom_velocity_z',
                 'low_imu_gyro_x', 'low_imu_gyro_y', 'low_imu_gyro_z'
             ] + [f'low_motor_{i}_dq' for i in range(num_motors)],
-
+            
             'g1_robot_ddq.dat': [
                 'low_imu_accel_x', 'low_imu_accel_y', 'low_imu_accel_z',
                 'body_ang_acceleration_x', 'body_ang_acceleration_y', 'body_ang_acceleration_z'
             ] + [f'low_motor_{i}_ddq' for i in range(num_motors)],
-
+            
             'g1_robot_tau.dat': [f'low_motor_{i}_tau_est' for i in range(num_motors)],
-
-            'g1_robot_contact.dat': ['odom_foot_contact_1', 'odom_foot_contact_2'],
-
-            # detectFootContacts(0.5) 的原始接触状态
-            'g1_robot_sim_contact.dat': ['odom_foot_contact_3', 'odom_foot_contact_4'],
-
-            # 新增：末端接触力（左脚6 + 右脚6）
-            'g1_robot_ee_force.dat': [
-                'odom_foot_force_1', 'odom_foot_force_2', 'odom_foot_force_3',
-                'odom_foot_force_4', 'odom_foot_force_5', 'odom_foot_force_6',
-                'odom_foot_force_7', 'odom_foot_force_8', 'odom_foot_force_9',
-                'odom_foot_force_10', 'odom_foot_force_11', 'odom_foot_force_12',
-            ],
+            
+            'g1_robot_contact.dat': ['odom_foot_force_1', 'odom_foot_force_2'],
         }
-
+        
         output_dir = csv_path.parent
-
+        
         for filename, cols in datasets.items():
             # 检查缺失列
             missing = [c for c in cols if c not in df.columns]
             if missing:
                 print(f"警告: {filename} 缺少列: {missing}")
                 continue
-
+            
             data = df[cols].to_numpy().T  # 转置
-
+            
             # 处理NaN和Inf
             has_nan = np.any(np.isnan(data))
             has_inf = np.any(np.isinf(data))
             if has_nan or has_inf:
                 print(f"警告: {filename} 包含 NaN/Inf，已替换为0")
                 data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-
+            
             # 保存
             output_path = output_dir / filename
             np.savetxt(output_path, data, delimiter='\t', fmt='%.6f')
             print(f"保存: {output_path}")
-
+        
         print(f"\nDAT文件已保存到: {output_dir}")
-
+    
     def run(self):
         """执行完整的数据采集流程"""
         # 1. 采集数据
         csv_path = self.collect()
-
+        
         if csv_path is None or not csv_path.exists():
             print("错误: 数据采集失败")
             return False
-
+        
         # 2. 处理CSV
         processed_path = self.process_csv(csv_path)
-
+        
         # 3. 转换为DAT
-        self.csv_to_dat(processed_path, num_motors=self.dat_motors)
-
+        self.csv_to_dat(processed_path)
+        
         print(f"\n{'='*60}")
         print(f"数据采集完成！")
         print(f"{'='*60}")
@@ -563,33 +518,27 @@ class G1ForceEEDataCollector:
         print(f"文件列表:")
         for f in sorted(self.output_dir.iterdir()):
             print(f"  - {f.name}")
-
+        
         return True
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='G1机器人惯性参数辨识数据采集一体化脚本（含末端接触力）',
+        description='G1机器人惯性参数辨识数据采集一体化脚本',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
   # 采集30秒数据到指定目录
-  python collect_identification_forceee_data.py ./data/varied_scenes/var_0000 --duration 30
-
-  # 采集并导出 29DoF 数据
-  python collect_identification_forceee_data.py ./data/var_0029 --duration 30 --dof-mode 29dof
-
-  # 兼容旧的 lock-waist / 27DoF 数据
-  python collect_identification_forceee_data.py ./data/var_0027 --duration 30 --dof-mode 27dof
-
+  python collect_g1_dds_data.py ./data/varied_scenes/var_0000 --duration 30
+  
   # 使用不同的domain_id
-  python collect_identification_forceee_data.py ./data/test --duration 20 --domain-id 1
-
+  python collect_g1_dds_data.py ./data/test --duration 20 --domain-id 1
+  
   # 只处理已有的CSV文件
-  python collect_identification_forceee_data.py ./data/var_0000 --process-only raw_data_xxx.csv
+  python collect_g1_dds_data.py ./data/var_0000 --process-only raw_data_xxx.csv
 """
     )
-
+    
     parser.add_argument('output_dir', type=str,
                         help='输出目录')
     parser.add_argument('--duration', type=float, default=30.0,
@@ -598,39 +547,23 @@ def main():
                         help='DDS Domain ID，默认0')
     parser.add_argument('--interface', type=str, default='lo',
                         help='网络接口，默认lo')
-    parser.add_argument('--dof-mode', type=str, default=None,
-                        help='快捷切换 12dof/29dof/27dof；会联动设置 motor-count 和 dat-motors')
-    parser.add_argument('--motor-count', type=int, default=None,
-                        help='采集时记录的电机数量；若设置了 --dof-mode，则默认跟随 dof 预设')
-    parser.add_argument('--dat-motors', type=int, default=None,
-                        help='DAT文件中导出的电机数量；若设置了 --dof-mode，则默认跟随 dof 预设')
+    parser.add_argument('--motor-count', type=int, default=35,
+                        help='电机数量，默认35')
+    parser.add_argument('--dat-motors', type=int, default=12,
+                        help='DAT文件中包含的电机数量，默认12')
     parser.add_argument('--process-only', type=str, default=None,
                         help='只处理已有的CSV文件，不进行采集')
-
+    
     args = parser.parse_args()
-    try:
-        dof_mode, motor_count, dat_motors = resolve_motor_settings(
-            dof_mode=args.dof_mode,
-            motor_count=args.motor_count,
-            dat_motors=args.dat_motors,
-        )
-    except ValueError as exc:
-        parser.error(str(exc))
-
-    if dat_motors > motor_count:
-        parser.error(
-            f"dat_motors ({dat_motors}) 不能大于 motor_count ({motor_count})"
-        )
-
-    collector = G1ForceEEDataCollector(
+    
+    collector = G1DataCollector(
         output_dir=args.output_dir,
         duration=args.duration,
         domain_id=args.domain_id,
         interface=args.interface,
-        motor_count=motor_count,
-        dat_motors=dat_motors,
+        motor_count=args.motor_count
     )
-
+    
     if args.process_only:
         # 只处理已有CSV
         csv_path = Path(args.output_dir) / args.process_only
@@ -638,7 +571,7 @@ def main():
             print(f"错误: 文件不存在: {csv_path}")
             sys.exit(1)
         processed = collector.process_csv(csv_path)
-        collector.csv_to_dat(processed, num_motors=dat_motors)
+        collector.csv_to_dat(processed, num_motors=args.dat_motors)
     else:
         # 完整采集流程
         success = collector.run()
