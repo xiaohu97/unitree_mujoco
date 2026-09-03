@@ -12,11 +12,17 @@
 #include <iostream>
 #include <array>
 #include <cmath>
+#include <mutex>
 
 #include "param.h"
 #include "physics_joystick.h"
 
 #define MOTOR_SENSOR_NUM 3
+
+// 由 main.cc 注入，指向 mj::Simulate::mtx（物理线程 mj_step 时持有的锁）。
+// bridge 线程按 1 kHz 读取接触数据，而 mj_step 会重建 d->contact / d->efc_force，
+// 不互斥的话 mj_contactForce 会拿着失效的 efc_address 越界读 -> 段错误。
+inline std::recursive_mutex* g_physics_mtx = nullptr;
 
 class UnitreeSDK2BridgeBase
 {
@@ -29,13 +35,22 @@ public:
             printSceneInformation();
         }
         if(param::config.use_joystick == 1) {
-            if(param::config.joystick_type == "xbox") {
-                joystick = std::make_shared<XBoxJoystick>(param::config.joystick_device, param::config.joystick_bits);
-            } else if(param::config.joystick_type == "switch") {
-                joystick  = std::make_shared<SwitchJoystick>(param::config.joystick_device, param::config.joystick_bits);
-            } else {
-                std::cerr << "Unsupported joystick type: " << param::config.joystick_type << std::endl;
-                exit(EXIT_FAILURE);
+            try {
+                if(param::config.joystick_type == "xbox") {
+                    joystick = std::make_shared<XBoxJoystick>(param::config.joystick_device, param::config.joystick_bits);
+                } else if(param::config.joystick_type == "switch") {
+                    joystick  = std::make_shared<SwitchJoystick>(param::config.joystick_device, param::config.joystick_bits);
+                } else {
+                    throw std::runtime_error("Unsupported joystick type: " + param::config.joystick_type);
+                }
+            } catch (const std::exception &e) {
+                // 没插手柄不该让整个仿真器挂掉。这里在 bridge 工作线程里，
+                // exit() 会与 DDS 静态析构竞争而段错误；下游 lowstate /
+                // wireless_controller 以及 SDK 的 publisher 都已判空，
+                // 留 nullptr 即可无手柄降级运行。
+                std::cerr << "[warn] " << e.what()
+                          << " -- 本次运行禁用手柄，仿真继续。" << std::endl;
+                joystick = nullptr;
             }
         }
 
@@ -102,6 +117,12 @@ protected:
         // 检测接触状态的通用方法
     std::vector<int16_t> detectFootContacts(double force_threshold = 0.5)
     {
+        // 与物理线程的 mj_step 互斥，见 g_physics_mtx 说明
+        std::unique_lock<std::recursive_mutex> physics_lock;
+        if (g_physics_mtx) {
+            physics_lock = std::unique_lock<std::recursive_mutex>(*g_physics_mtx);
+        }
+
         std::vector<int16_t> contact_states(foot_body_ids_.size(), CONTACT_UNKNOWN);
         
         if (foot_body_ids_.empty()) {
@@ -152,6 +173,12 @@ protected:
     // 计算脚底六维力 [fx fy fz mx my mz]（世界坐标系，力矩关于脚部body原点）
     std::vector<std::array<double, 6>> computeFootWrenches()
     {
+        // 与物理线程的 mj_step 互斥，见 g_physics_mtx 说明
+        std::unique_lock<std::recursive_mutex> physics_lock;
+        if (g_physics_mtx) {
+            physics_lock = std::unique_lock<std::recursive_mutex>(*g_physics_mtx);
+        }
+
         std::vector<std::array<double, 6>> wrenches(foot_body_ids_.size(), {0, 0, 0, 0, 0, 0});
 
         if (foot_body_ids_.empty()) {

@@ -683,6 +683,9 @@ int main(int argc, char **argv)
     std::make_unique<mj::GlfwAdapter>(),
     &cam, &opt, &pert, /* is_passive = */ false);
 
+  // 必须在启动 bridge 线程之前注入，供其读取接触数据时与 mj_step 互斥
+  g_physics_mtx = &sim->mtx;
+
   std::thread unitree_thread(UnitreeSdk2BridgeThread, nullptr);
 
   // start physics thread
