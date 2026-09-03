@@ -1,6 +1,8 @@
 #pragma once
 
 #include <iostream>
+#include <stdexcept>
+#include <string>
 #include <unitree/dds_wrapper/common/unitree_joystick.hpp>
 #include "joystick/joystick.h"
 #include <memory>
@@ -14,8 +16,9 @@ public:
 	{
 		js_ = std::make_unique<Joystick>(device);
 		if(!js_->isFound()) {
-			std::cout << "Error: Joystick open failed." << std::endl;
-			exit(1);
+			// 不在这里 exit()：本构造函数运行在 bridge 工作线程，
+			// exit() 会和 DDS 的静态析构抢 __exit_funcs_lock 而变成段错误。
+			throw std::runtime_error("Joystick open failed: " + device);
 		}
         max_value_ = 1 << (bits - 1);
 	}
@@ -56,8 +59,9 @@ public:
 	{
 		js_ = std::make_unique<Joystick>(device);
 		if(!js_->isFound()) {
-			std::cout << "Error: Joystick open failed." << std::endl;
-			exit(1);
+			// 不在这里 exit()：本构造函数运行在 bridge 工作线程，
+			// exit() 会和 DDS 的静态析构抢 __exit_funcs_lock 而变成段错误。
+			throw std::runtime_error("Joystick open failed: " + device);
 		}
         max_value_ = 1 << (bits - 1);
 	}
