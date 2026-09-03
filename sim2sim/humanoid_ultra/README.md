@@ -72,25 +72,29 @@ pt/
 ├── zxh-mimic-taitui-left/
 │   ├── policy.pt
 │   └── ustc_taitui_left_stand_transition.npz
-└── zxh-mimic-taitui-right/
+├── zxh-mimic-taitui-right/
+│   ├── policy.pt
+│   └── ustc_taitui_right_stand_transition.npz
+└── zxh-mimic-dance-bounce-to-feet/
     ├── policy.pt
-    └── ustc_taitui_right_stand_transition.npz
+    └── dance_bounce_to_feet_stand_transition.npz
 ```
 
-不传 `--policy` 时默认加载以上六个策略，启动状态固定为 walk：
+不传 `--policy` 时默认加载以上七个策略，启动状态固定为 walk：
 
 ```text
 stand <-- X / P --> walk
-                       ├── LT+RIGHT / M --> pick_play ---------┐
-                       ├── LT+DOWN  / H --> houtaitui_play ----┤
-                       ├── LT+UP    / I --> spin_play ---------┤
-                       ├── LT+LEFT  / T --> taitui_left_play --┤
-                       └── RT+RIGHT / Y --> taitui_right_play -┤
-                                                             └--> walk
+                       ├── LT+RIGHT / M --> pick_play ---------------┐
+                       ├── LT+DOWN  / H --> houtaitui_play ----------┤
+                       ├── LT+UP    / I --> spin_play ---------------┤
+                       ├── LT+LEFT  / T --> taitui_left_play --------┤
+                       ├── RT+RIGHT / Y --> taitui_right_play -------┤
+                       └── RT+DOWN  / B --> dance_bounce_to_feet ----┤
+                                                                   └--> walk
 ```
 
 RT is a second modifier layer, added because the four LT+D-pad slots were
-full.  RT+Down/Up/Left are still free for future actions.
+full.  RT+Up/Left are still free for future actions.
 
 运行：
 

@@ -282,6 +282,21 @@ DEFAULT_MIMIC_ACTIONS = (
         target_speed=6.0,
         use_current_asset_defaults=True,
     ),
+    MimicActionSpec(
+        name="dance_bounce_to_feet",
+        trigger="rt_down",  # LT+D-pad is full; RT keeps the second modifier layer
+        policy_path=POLICY_DIR / "zxh-mimic-dance-bounce-to-feet" / "policy.pt",
+        motion_path=(
+            POLICY_DIR
+            / "zxh-mimic-dance-bounce-to-feet"
+            / "dance_bounce_to_feet_stand_transition.npz"
+        ),
+        keyboard_key="b",
+        target_speed=6.0,
+        # Trained with the +-0.1 shoulder-roll zero point like the other
+        # current-defaults 144-D policies (run params/env.yaml).
+        use_current_asset_defaults=True,
+    ),
 )
 
 
