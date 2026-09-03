@@ -60,9 +60,13 @@ sudo make install
 
 下载mujoco[安装包](https://github.com/google-deepmind/mujoco/releases), 解压到 `~/.mujoco` 目录下;
 
+注意选**和 Python 端一致的版本**：`sim2sim/humanoid_ultra/sim2sim.py` 跑在 `gmr`
+conda 环境里，那边的 `mujoco` 是 3.9.0，两边版本不一致会导致同一场景的接触求解
+结果对不上。本机当前用的就是 3.9.0。
+
 ```
 cd unitree_mujoco/simulate/
-ln -s ~/.mujoco/mujoco-3.3.6 mujoco
+ln -s ~/.mujoco/mujoco-3.9.0 mujoco
 ```
 
 ### 2. 编译 unitree_mujoco
