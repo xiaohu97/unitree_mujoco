@@ -1,0 +1,10 @@
+2026-10-28 替换为"前方上抬"轨迹策略 (适配实测相机: 离地 1.233 m, 下倾 40.6 度)
+policy.pt  <- /home/zxh/unitree_rl_lab/logs/rsl_rl/humanoidultra27dof_stand_leftarm_front/2026-10-27_17-13-15_front_up_cam40_5kg/exported/policy.pt (model_39396, md5 9281a451bebc047d299362db9db227dc)
+  训练链: ... -> 前方轨迹 v1 model_36198 -> 本次在上抬轨迹上微调 3000 次 (pos std 0.15, 负载 0-5 kg)
+  Isaac 512 env: 跟踪 RMS 0.025 rad, 0 摔倒, 0 手腕碰撞; MuJoCo sim2sim: RMS 0.030 rad, 最大倾斜 1.5 度
+left_wrist_pitch_traj.csv <- unitree_rl_lab/.../stand_leftarm/left_wrist_pitch_front_up_traj.csv (改名)
+  = 前方轨迹 v1 + 常值偏移: 肩 pitch -0.225, 肩 roll +0.10, 肘 -0.025 rad; 手腕激励不变
+  预测: 重物中心在光轴上方 4 度 ~ 下方 8 度 (v1 实测在下方 17~31 度), 边缘最多超出约 1.4 度
+  5 kg 时肩 pitch 峰值 32 Nm (上限 60), 比 v1 的 27 Nm 大, 注意电机温度
+env.yaml / agent.yaml / stand_leftarm_env_cfg.py <- /home/zxh/unitree_rl_lab/logs/rsl_rl/humanoidultra27dof_stand_leftarm_front/2026-10-27_17-13-15_front_up_cam40_5kg/params/ (轨迹文件由命令行覆盖, cfg.py 里仍写旧文件名)
+上一版 (前方轨迹 v1, model_36198) 备份在 验证过/1027_前方轨迹v1_36198/ ; 回滚: 把该目录文件拷回本目录

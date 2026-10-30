@@ -1,0 +1,7 @@
+2026-10-27 替换为前方工作空间(躯干相机可见)轨迹策略
+policy.pt  <- /home/zxh/unitree_rl_lab/logs/rsl_rl/humanoidultra27dof_stand_leftarm_front/2026-10-22_11-58-27_front_stage2_posstd0.15/exported/policy.pt (model_36198)
+  训练链: 0727(model_30000) -> 10-22_10-30-06(model_32000, lr1e-5 停滞) -> stage1 pos std 0.5 (model_33000) -> stage2 std 0.15 (model_36198)
+  负载 0-5 kg, period 6.0 s, safe pose 与 0727 相同
+left_wrist_pitch_traj.csv <- unitree_rl_lab/.../stand_leftarm/left_wrist_pitch_front_traj.csv (改名)
+env.yaml / agent.yaml / stand_leftarm_env_cfg.py <- /home/zxh/unitree_rl_lab/logs/rsl_rl/humanoidultra27dof_stand_leftarm_front/2026-10-22_11-58-27_front_stage2_posstd0.15/params/ (训练时 CSV 用的是 front 文件名, 由命令行覆盖, 故 cfg.py 里仍写旧文件名)
+sim2sim 里原来的 0805 policy.pt + 侧向轨迹备份在 验证过/0805_侧向轨迹_完整备份/
