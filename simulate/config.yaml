@@ -18,3 +18,21 @@ joystick_bits: 16 # Some game controllers may only have 8-bit accuracy
 print_scene_information: 1 # Print link, joint and sensors information of robot
 
 enable_elastic_band: 1 # 虚拟弹力带，用于吊起 h1/g1（键盘 7/8 调长度，9 开关）
+
+# 感知版 walk 的高程图（unitree_rl_lab 的 Velocity_Rough 状态订阅 rt/perceptive/height_map）。
+# 在 MuJoCo 里复刻训练侧 torso_link 上的 17x11 @ 0.1 m 高程扫描，见 src/height_map_publisher.h。
+enable_height_map: 1
+height_map_topic: "rt/perceptive/height_map"
+height_map_body: "torso_link"   # g1 / h1 用 torso_link；其它机器人按训练里 RayCaster 挂的 link 改
+height_map_rate: 50             # Hz；和策略同频。10 Hz 时地图最多滞后 100 ms（1 m/s 下差一整格），
+                                # 实测摔倒率 1.9% -> 3.4%；50 Hz 下这一项基本消失
+                                # 控制器超过 0.3 s 没收到会退回平地并告警
+
+# 查看器里的感知叠加显示（只画不算，键盘 M 开关高程图、C 开关深度相机视野）
+enable_perception_overlay: 1
+overlay_show_height_map: 1   # 策略实际消费的 17x11 网格：蓝=低 绿=平 红=高，未知格不画
+overlay_show_camera: 1       # D435 深度视野(87x58 deg, 俯仰 47.6 deg)：青=地形 橙=打到自己 黄=视锥边
+overlay_rate: 20             # Hz
+overlay_camera_cols: 24
+overlay_camera_rows: 14
+overlay_camera_range: 4.0    # m，超出不画

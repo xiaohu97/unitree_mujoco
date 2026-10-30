@@ -41,6 +41,16 @@ def SimulationThread():
     ChannelFactoryInitialize(config.DOMAIN_ID, config.INTERFACE)
     unitree = UnitreeSdk2Bridge(mj_model, mj_data)
 
+    height_map = None
+    height_map_period = 1
+    if getattr(config, "ENABLE_HEIGHT_MAP", False):
+        from height_map_publisher import HeightMapPublisher
+
+        height_map = HeightMapPublisher(mj_model, topic=config.HEIGHT_MAP_TOPIC, body_name=config.HEIGHT_MAP_BODY)
+        height_map_period = max(1, int(round(1.0 / (config.HEIGHT_MAP_RATE * config.SIMULATE_DT))))
+        print(f"Publishing height map on '{config.HEIGHT_MAP_TOPIC}' every {height_map_period} steps")
+    step_count = 0
+
     if config.USE_JOYSTICK:
         unitree.SetupJoystick(device_id=0, js_type=config.JOYSTICK_TYPE)
     if config.PRINT_SCENE_INFORMATION:
@@ -57,6 +67,9 @@ def SimulationThread():
                     mj_data.qpos[:3], mj_data.qvel[:3]
                 )
         mujoco.mj_step(mj_model, mj_data)
+        step_count += 1
+        if height_map is not None and step_count % height_map_period == 0:
+            height_map.publish(mj_data, mj_data.time)
 
         locker.release()
 

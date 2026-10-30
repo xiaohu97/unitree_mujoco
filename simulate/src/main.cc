@@ -33,6 +33,8 @@
 #include "simulate.h"
 #include "array_safety.h"
 #include "unitree_sdk2_bridge.h"
+#include "height_map_publisher.h"
+#include "perception_overlay.h"
 #include "param.h"
 
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
@@ -84,6 +86,11 @@ public:
   std::vector<double> f_ = {0, 0, 0};
 };
 inline ElasticBand elastic_band;
+
+// 查看器里的感知叠加显示（高程图 / 深度相机视野）。在 main 里创建 Simulate 后赋值，
+// 由 bridge 线程在模型就绪后构造 overlay 并挂到 sim->user_scn；键盘回调里切换显示。
+inline mujoco::Simulate* g_sim = nullptr;
+inline std::unique_ptr<PerceptionOverlay> g_perception_overlay;
 
 
 namespace
@@ -600,7 +607,37 @@ void *UnitreeSdk2BridgeThread(void *arg)
     interface = std::make_unique<Go2Bridge>(m, d);
   }
   interface->start();
-  
+
+  // 感知版 walk 的高程图：和 lowstate 走同一套 DDS，控制器的 Velocity_Rough 状态订阅它
+  std::unique_ptr<HeightMapPublisher> height_map;
+  if (param::config.enable_height_map == 1) {
+    try {
+      height_map = std::make_unique<HeightMapPublisher>(m, d, g_physics_mtx, param::config.height_map_topic,
+                                                        param::config.height_map_body, param::config.height_map_rate);
+      height_map->start();
+    } catch (const std::exception& e) {
+      std::cerr << "[warn] height map publisher disabled: " << e.what() << std::endl;
+    }
+  }
+
+  if (param::config.enable_perception_overlay == 1 && g_sim) {
+    try {
+      PerceptionOverlayConfig overlay_cfg;
+      overlay_cfg.body = param::config.height_map_body;
+      overlay_cfg.show_height_map = param::config.overlay_show_height_map == 1;
+      overlay_cfg.show_camera = param::config.overlay_show_camera == 1;
+      overlay_cfg.rate_hz = param::config.overlay_rate;
+      overlay_cfg.camera_cols = param::config.overlay_camera_cols;
+      overlay_cfg.camera_rows = param::config.overlay_camera_rows;
+      overlay_cfg.camera_range = param::config.overlay_camera_range;
+      g_perception_overlay = std::make_unique<PerceptionOverlay>(m, d, g_physics_mtx, overlay_cfg);
+      g_sim->user_scn = g_perception_overlay->scene();
+      g_perception_overlay->start();
+    } catch (const std::exception& e) {
+      std::cerr << "[warn] perception overlay disabled: " << e.what() << std::endl;
+    }
+  }
+
   while (true)
   {
     sleep(1);
@@ -634,6 +671,14 @@ void user_key_cb(GLFWwindow* window, int key, int scancode, int act, int mods) {
     if(key==GLFW_KEY_BACKSPACE) {
       mj_resetData(m, d);
       mj_forward(m, d);
+    }
+    // 感知叠加显示：M = 高程图（策略实际看到的 17x11 网格），C = 深度相机视野
+    if (g_perception_overlay) {
+      if (key==GLFW_KEY_M) {
+        g_perception_overlay->toggle_height_map();
+      } else if (key==GLFW_KEY_C) {
+        g_perception_overlay->toggle_camera();
+      }
     }
   }
 }
@@ -685,6 +730,7 @@ int main(int argc, char **argv)
 
   // 必须在启动 bridge 线程之前注入，供其读取接触数据时与 mj_step 互斥
   g_physics_mtx = &sim->mtx;
+  g_sim = sim.get();
 
   std::thread unitree_thread(UnitreeSdk2BridgeThread, nullptr);
 

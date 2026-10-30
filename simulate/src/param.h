@@ -25,6 +25,19 @@ inline struct SimulationConfig
 
     int enable_elastic_band;
     int band_attached_link = 0;
+    // 感知版 walk 的高程图发布（见 height_map_publisher.h），可选项，缺省关闭
+    int enable_height_map = 0;
+    std::string height_map_topic = "rt/perceptive/height_map";
+    std::string height_map_body = "torso_link";
+    double height_map_rate = 10.0;
+    // MuJoCo 查看器里的感知叠加显示（见 perception_overlay.h），M / C 键开关
+    int enable_perception_overlay = 1;
+    int overlay_show_height_map = 1;
+    int overlay_show_camera = 0;
+    double overlay_rate = 20.0;
+    int overlay_camera_cols = 24;
+    int overlay_camera_rows = 14;
+    double overlay_camera_range = 4.0;
 
     void load_from_yaml(const std::string &filename)
     {
@@ -41,6 +54,17 @@ inline struct SimulationConfig
             joystick_bits = cfg["joystick_bits"].as<int>();
             print_scene_information = cfg["print_scene_information"].as<int>();
             enable_elastic_band = cfg["enable_elastic_band"].as<int>();
+            if (cfg["enable_height_map"]) enable_height_map = cfg["enable_height_map"].as<int>();
+            if (cfg["height_map_topic"]) height_map_topic = cfg["height_map_topic"].as<std::string>();
+            if (cfg["height_map_body"]) height_map_body = cfg["height_map_body"].as<std::string>();
+            if (cfg["height_map_rate"]) height_map_rate = cfg["height_map_rate"].as<double>();
+            if (cfg["enable_perception_overlay"]) enable_perception_overlay = cfg["enable_perception_overlay"].as<int>();
+            if (cfg["overlay_show_height_map"]) overlay_show_height_map = cfg["overlay_show_height_map"].as<int>();
+            if (cfg["overlay_show_camera"]) overlay_show_camera = cfg["overlay_show_camera"].as<int>();
+            if (cfg["overlay_rate"]) overlay_rate = cfg["overlay_rate"].as<double>();
+            if (cfg["overlay_camera_cols"]) overlay_camera_cols = cfg["overlay_camera_cols"].as<int>();
+            if (cfg["overlay_camera_rows"]) overlay_camera_rows = cfg["overlay_camera_rows"].as<int>();
+            if (cfg["overlay_camera_range"]) overlay_camera_range = cfg["overlay_camera_range"].as<double>();
         }
         catch(const std::exception& e)
         {
