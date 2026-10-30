@@ -853,11 +853,21 @@ class MimicMotion:
         return np.concatenate(flattened_history)
 
     def align_anchor_to(self, robot_anchor_quaternion: np.ndarray) -> None:
-        """Rotate the reference clip so its first anchor matches the live robot."""
+        """Rotate the reference clip about z so its first anchor heading matches the robot.
+
+        Heading only: copying roll/pitch too would keep the walk policy's lean at
+        the trigger for the whole clip, which training never saw.
+        """
+
+        def heading(quaternion: np.ndarray) -> np.ndarray:
+            w, x, y, z = quaternion
+            yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+            return np.asarray((np.cos(0.5 * yaw), 0.0, 0.0, np.sin(0.5 * yaw)))
+
         reference_anchor = self.body_quat_w[self.start_frame, self.anchor_body_index]
         self.anchor_alignment = quaternion_multiply(
-            robot_anchor_quaternion,
-            quaternion_conjugate(reference_anchor),
+            heading(robot_anchor_quaternion),
+            quaternion_conjugate(heading(reference_anchor)),
         )
 
     def advance(self) -> bool:
